@@ -11,19 +11,52 @@ const config = {
   jwtSecret: process.env.JWT_SECRET || "",
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || "30d",
   publicApiUrl: (process.env.PUBLIC_API_URL || "").replace(/\/$/, ""),
-  webAppUrl: (process.env.WEB_APP_URL || "http://localhost:5173").replace(/\/$/, ""),
-  uploadDir: path.resolve(path.join(__dirname, ".."), process.env.UPLOAD_DIR || "./uploads"),
+  webAppUrl: (process.env.WEB_APP_URL || "http://localhost:5173").replace(
+    /\/$/,
+    "",
+  ),
+  uploadDir: path.resolve(
+    path.join(__dirname, ".."),
+    process.env.UPLOAD_DIR || "./uploads",
+  ),
   maxUploadBytes: Number(process.env.MAX_UPLOAD_MB || 25) * 1024 * 1024,
   reminderWindow: Number(process.env.REMINDER_WINDOW_MINUTES || 15),
-  timezone: process.env.TIMEZONE || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+  timezone:
+    process.env.TIMEZONE ||
+    Intl.DateTimeFormat().resolvedOptions().timeZone ||
+    "UTC",
   metaAppSecret: process.env.META_APP_SECRET || "",
+  // File storage: Cloudinary when these are set, otherwise inside MongoDB (GridFS).
+  cloudinary: (() => {
+    let cloud = process.env.CLOUDINARY_CLOUD_NAME || "";
+    let key = process.env.CLOUDINARY_API_KEY || "";
+    let secret = process.env.CLOUDINARY_API_SECRET || "";
+    // also accepts the single CLOUDINARY_URL=cloudinary://<key>:<secret>@<cloud> from the Cloudinary dashboard
+    const m = /^cloudinary:\/\/([^:]+):([^@]+)@(.+)$/.exec(
+      (process.env.CLOUDINARY_URL || "").trim(),
+    );
+    if (m) [, key, secret, cloud] = m;
+    return {
+      enabled: !!(cloud && key && secret),
+      cloud: cloud.trim(),
+      key: key.trim(),
+      secret: secret.trim(),
+      folder: (process.env.CLOUDINARY_FOLDER || "aucwin-crm").replace(
+        /^\/+|\/+$/g,
+        "",
+      ),
+      apiBase: (
+        process.env.CLOUDINARY_API_BASE || "https://api.cloudinary.com/v1_1"
+      ).replace(/\/$/, ""),
+    };
+  })(),
   smtp: {
     host: process.env.SMTP_HOST || "",
     port: Number(process.env.SMTP_PORT || 587),
     secure: String(process.env.SMTP_SECURE || "false") === "true",
     user: process.env.SMTP_USER || "",
     pass: process.env.SMTP_PASS || "",
-    from: process.env.MAIL_FROM || "Harbour CRM <no-reply@example.com>",
+    from: process.env.MAIL_FROM || "AucWin CRM <no-reply@example.com>",
   },
 };
 
@@ -33,7 +66,9 @@ if (!config.jwtSecret || config.jwtSecret.startsWith("CHANGE_ME")) {
     process.exit(1);
   }
   config.jwtSecret = "dev-only-insecure-secret";
-  console.warn("WARNING: JWT_SECRET not set — using an insecure development secret.");
+  console.warn(
+    "WARNING: JWT_SECRET not set — using an insecure development secret.",
+  );
 }
 
 module.exports = config;

@@ -1,13 +1,21 @@
 /** Mirrors the ON DELETE CASCADE / SET NULL rules of the original schema. */
-const fs = require("fs/promises");
-const path = require("path");
-const config = require("../config");
-const { Lead, Client, FollowUp, Task, Document, Payment, Activity, Note, ChatMessage, IntegrationEvent } = require("../models");
+const { deleteFiles } = require("./files");
+const {
+  Lead,
+  Client,
+  FollowUp,
+  Task,
+  Document,
+  Payment,
+  Activity,
+  Note,
+  ChatMessage,
+  IntegrationEvent,
+} = require("../models");
 
+/** Deletes the stored files (in MongoDB, or on disk for old uploads). */
 async function removeFiles(docs) {
-  for (const d of docs) {
-    await fs.unlink(path.join(config.uploadDir, d.storage_path)).catch(() => {});
-  }
+  await deleteFiles(docs);
 }
 
 async function deleteLeadCascade(leadId) {
@@ -21,7 +29,10 @@ async function deleteLeadCascade(leadId) {
     Note.updateMany({ lead_id: leadId }, { $set: { lead_id: null } }),
     Client.updateMany({ lead_id: leadId }, { $set: { lead_id: null } }),
     ChatMessage.updateMany({ lead_id: leadId }, { $set: { lead_id: null } }),
-    IntegrationEvent.updateMany({ lead_id: leadId }, { $set: { lead_id: null } }),
+    IntegrationEvent.updateMany(
+      { lead_id: leadId },
+      { $set: { lead_id: null } },
+    ),
   ]);
   await Lead.deleteOne({ _id: leadId });
 }
@@ -36,8 +47,14 @@ async function deleteClientCascade(clientId) {
     Activity.deleteMany({ client_id: clientId }),
     Task.updateMany({ client_id: clientId }, { $set: { client_id: null } }),
     Note.updateMany({ client_id: clientId }, { $set: { client_id: null } }),
-    ChatMessage.updateMany({ client_id: clientId }, { $set: { client_id: null } }),
-    Lead.updateMany({ converted_client_id: clientId }, { $set: { converted_client_id: null } }),
+    ChatMessage.updateMany(
+      { client_id: clientId },
+      { $set: { client_id: null } },
+    ),
+    Lead.updateMany(
+      { converted_client_id: clientId },
+      { $set: { converted_client_id: null } },
+    ),
   ]);
   await Client.deleteOne({ _id: clientId });
 }

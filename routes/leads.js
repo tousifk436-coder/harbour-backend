@@ -64,7 +64,7 @@ router.post("/import", wrap(async (req, res) => {
     const data = {
       name, phone: r.phone || null, email: r.email || null, company: r.company || null, address: r.address || null,
       source: ENUMS.leadSource.includes(r.source) ? r.source : "other",
-      status: ENUMS.leadStatus.includes(r.status) ? r.status : "new",
+      status: ENUMS.leadStatus.includes(r.status) ? r.status : "new_lead",
       estimated_value: Number(r.estimated_value) > 0 ? Number(r.estimated_value) : 0,
       notes: r.notes || null, assigned_to: assigned,
     };
@@ -140,10 +140,10 @@ router.post("/:id/convert", wrap(async (req, res) => {
     notes: lead.notes, assigned_to: lead.assigned_to, department_id: lead.department_id, created_by: req.user._id,
   });
   // atomic guard against double conversion
-  const updated = await Lead.findOneAndUpdate({ _id: lead._id, converted_client_id: null }, { $set: { status: "won", converted_client_id: client._id } }, { new: true });
+  const updated = await Lead.findOneAndUpdate({ _id: lead._id, converted_client_id: null }, { $set: { status: "sale_done", converted_client_id: client._id } }, { new: true });
   if (!updated) { await Client.deleteOne({ _id: client._id }); throw bad("Lead has already been converted"); }
-  if (lead.status !== "won") {
-    await logActivity({ lead_id: lead._id, type: "status_change", title: `Status changed from ${lead.status} to won`, metadata: { from: lead.status, to: "won" }, user_id: req.user._id, department_id: lead.department_id });
+  if (lead.status !== "sale_done") {
+    await logActivity({ lead_id: lead._id, type: "status_change", title: `Status changed from ${lead.status} to sale_done`, metadata: { from: lead.status, to: "sale_done" }, user_id: req.user._id, department_id: lead.department_id });
   }
   await logActivity({ lead_id: lead._id, client_id: client._id, type: "converted", title: "Lead converted to client", user_id: req.user._id, department_id: lead.department_id });
   emitChange("leads"); emitChange("clients");

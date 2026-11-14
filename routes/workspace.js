@@ -136,10 +136,10 @@ router.get("/dashboard", wrap(async (req, res) => {
     FollowUp.countDocuments(m({ status: "pending" })),
     FollowUp.countDocuments(m({ status: "pending", due_at: { $lt: now } })),
     FollowUp.countDocuments(m({ status: "pending", due_at: { $gte: startOfDay(), $lte: endOfDay() } })),
-    Lead.countDocuments(m({ status: "won" })),
+    Lead.countDocuments(m({ status: "sale_done" })),
     sumPay({ status: "paid" }),
     sumPay({ status: { $in: ["pending", "overdue"] } }),
-    Lead.aggregate([{ $match: m({ status: { $nin: ["won", "lost"] } }) }, { $group: { _id: null, s: { $sum: "$estimated_value" } } }]),
+    Lead.aggregate([{ $match: m({ status: { $nin: ["sale_done", "junk"] } }) }, { $group: { _id: null, s: { $sum: "$estimated_value" } } }]),
     groupCount("status"),
     groupCount("source"),
     Lead.find(m({ created_at: { $gte: since } })).select("created_at").lean(),
@@ -169,7 +169,7 @@ router.get("/module-counts", wrap(async (req, res) => {
   const m = (extra) => ({ $and: [scope, extra] });
   const now = new Date();
   const [leads, tasks, reminders, meetings, todos, notes, channels, today, clients, followups_overdue] = await Promise.all([
-    Lead.countDocuments(m({ status: { $nin: ["won", "lost"] } })),
+    Lead.countDocuments(m({ status: { $nin: ["sale_done", "junk"] } })),
     Task.countDocuments(m({ status: { $ne: "done" } })),
     FollowUp.countDocuments(m({ type: "reminder", status: "pending" })),
     FollowUp.countDocuments(m({ type: "meeting", status: "pending", due_at: { $gte: now } })),

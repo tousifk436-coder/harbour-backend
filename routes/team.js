@@ -279,7 +279,7 @@ router.get(
       tasksOpen,
     ] = await Promise.all([
       countBy(Lead, {}),
-      countBy(Lead, { status: "won" }),
+      countBy(Lead, { status: "sale_done" }),
       countBy(Lead, { created_at: { $gte: since30 } }),
       countBy(Client, {}),
       countBy(FollowUp, { status: "done", completed_at: { $gte: since30 } }),

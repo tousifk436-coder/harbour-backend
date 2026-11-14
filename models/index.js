@@ -36,7 +36,7 @@ const leadSchema = new Schema({
   company: str,
   address: str,
   source: { type: String, enum: ENUMS.leadSource, default: "other" },
-  status: { type: String, enum: ENUMS.leadStatus, default: "new" },
+  status: { type: String, enum: ENUMS.leadStatus, default: "new_lead" },
   estimated_value: { type: Number, default: 0, min: [0, "Estimated value cannot be negative"] },
   notes: str,
   assigned_to: nullableRef("User"),

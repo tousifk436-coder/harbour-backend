@@ -6,7 +6,7 @@ const ObjectId = Schema.Types.ObjectId;
 /** Enum values shared with the web and mobile apps. */
 const ENUMS = {
   role: ["super_admin", "admin", "employee"],
-  leadStatus: ["new", "contacted", "qualified", "proposal", "won", "lost"],
+  leadStatus: ["prospect", "follow_up", "meeting_scheduled", "meeting_done", "sale_done", "dnp", "unreachable", "qualified", "new_lead", "junk", "rspv"],
   leadSource: ["website", "referral", "social_media", "facebook", "phone", "walk_in", "advertisement", "other"],
   followupType: ["call", "meeting", "reminder", "email", "whatsapp"],
   followupStatus: ["pending", "done", "cancelled"],

@@ -43,9 +43,11 @@ async function canAssignTo(u, targetId) {
  * Stamp created_by / assigned_to / department_id on a new record so employees'
  * records always belong to them (an employee cannot assign to someone else).
  */
-async function stampOwnership(u, data) {
+async function stampOwnership(u, data, options = {}) {
   data.created_by = u._id;
-  if (u.role === "employee" || !data.assigned_to) data.assigned_to = u._id;
+  // Bulk imports may intentionally leave a lead unassigned when the supplied
+  // staff name does not match a CRM employee. Manual creation keeps the old fallback.
+  if (u.role === "employee" || (!options.preserveUnassigned && !data.assigned_to)) data.assigned_to = u._id;
   if (!data.department_id) {
     const a = await User.findById(data.assigned_to).select("department_id").lean();
     data.department_id = (a && a.department_id) || u.department_id || null;

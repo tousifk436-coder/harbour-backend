@@ -68,7 +68,7 @@ router.post("/import", wrap(async (req, res) => {
       estimated_value: Number(r.estimated_value) > 0 ? Number(r.estimated_value) : 0,
       notes: r.notes || null, assigned_to: assigned,
     };
-    await stampOwnership(req.user, data);
+    await stampOwnership(req.user, data, { preserveUnassigned: true });
     try {
       const lead = await Lead.create(data);
       await Activity.create({ lead_id: lead._id, type: "created", title: "Lead created", user_id: req.user._id, department_id: lead.department_id });

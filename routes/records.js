@@ -221,6 +221,13 @@ router.delete(
       throw forbidden("Only admins or the uploader can delete this document.");
     await removeFiles([d]);
     await d.deleteOne();
+    await logActivity({
+      lead_id: d.lead_id,
+      client_id: d.client_id,
+      type: "document",
+      title: `Deleted ${d.name}`,
+      user_id: req.user._id,
+    });
     emitChange("documents");
     res.json({ ok: true });
   }),

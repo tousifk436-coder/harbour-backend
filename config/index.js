@@ -58,6 +58,16 @@ const config = {
     pass: process.env.SMTP_PASS || "",
     from: process.env.MAIL_FROM || "AucWin CRM <no-reply@example.com>",
   },
+  // Master owner account. The backend makes sure a super_admin with this email and
+  // password always exists, so it can sign in to both the web CRM and the Android app.
+  // Set these in .env locally and in Render's Environment tab in production.
+  owner: {
+    email: String(process.env.OWNER_EMAIL || "")
+      .trim()
+      .toLowerCase(),
+    password: String(process.env.OWNER_PASSWORD || ""),
+    name: process.env.OWNER_NAME || "Owner",
+  },
 };
 
 if (!config.jwtSecret || config.jwtSecret.startsWith("CHANGE_ME")) {

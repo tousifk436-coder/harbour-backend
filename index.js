@@ -17,6 +17,7 @@ const { requireAuth } = require("./middleware/auth");
 const { errorHandler } = require("./middleware/error");
 const { initRealtime } = require("./utils/realtime");
 const { ensureDefaultChannels } = require("./utils/channels");
+const { ensureOwner } = require("./utils/ensureOwner");
 const { startReminderJob } = require("./jobs/reminders");
 
 // ---------------- CORS: public — any website or app may call this API ----------------
@@ -99,6 +100,7 @@ async function start() {
     `MongoDB connected: ${config.mongoUri.replace(/\/\/[^@]*@/, "//***@")}`,
   );
   await ensureDefaultChannels();
+  await ensureOwner();
 
   const server = http.createServer(app);
   initRealtime(server, corsOptions);

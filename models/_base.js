@@ -6,15 +6,54 @@ const ObjectId = Schema.Types.ObjectId;
 /** Enum values shared with the web and mobile apps. */
 const ENUMS = {
   role: ["super_admin", "admin", "employee"],
-  leadStatus: ["prospect", "follow_up", "meeting_scheduled", "meeting_done", "sale_done", "dnp", "unreachable", "qualified", "new_lead", "junk", "rspv"],
-  leadSource: ["website", "referral", "social_media", "facebook", "phone", "walk_in", "advertisement", "other"],
+  leadStatus: [
+    "prospect",
+    "follow_up",
+    "meeting_scheduled",
+    "meeting_done",
+    "sale_done",
+    "dnp",
+    "unreachable",
+    "qualified",
+    "new_lead",
+    "junk",
+    "rspv",
+  ],
+  leadSource: [
+    "website",
+    "referral",
+    "social_media",
+    "facebook",
+    "phone",
+    "walk_in",
+    "advertisement",
+    "other",
+  ],
   followupType: ["call", "meeting", "reminder", "email", "whatsapp"],
   followupStatus: ["pending", "done", "cancelled"],
   taskStatus: ["todo", "in_progress", "done"],
   priority: ["low", "medium", "high"],
-  serviceStatus: ["onboarding", "in_progress", "on_hold", "completed", "cancelled"],
+  serviceStatus: [
+    "onboarding",
+    "in_progress",
+    "on_hold",
+    "completed",
+    "cancelled",
+  ],
   paymentStatus: ["pending", "paid", "overdue", "refunded"],
-  activityType: ["note", "call", "email", "meeting", "status_change", "assignment", "document", "payment", "created", "converted", "system"],
+  activityType: [
+    "note",
+    "call",
+    "email",
+    "meeting",
+    "status_change",
+    "assignment",
+    "document",
+    "payment",
+    "created",
+    "converted",
+    "system",
+  ],
   noteColor: ["yellow", "pink", "blue", "green", "purple", "orange"],
   channelType: ["general", "department", "direct", "group"],
   integrationKind: ["facebook", "website"],
@@ -52,6 +91,23 @@ function relation(schema, name, ref, localField) {
 }
 
 const nullableRef = (ref) => ({ type: ObjectId, ref, default: null });
+// Required tenant reference: every business record belongs to exactly one workspace (company).
+const wsRef = () => ({
+  type: ObjectId,
+  ref: "Workspace",
+  required: true,
+  index: true,
+});
 const str = { type: String, default: null, trim: true };
 
-module.exports = { mongoose, Schema, ObjectId, ENUMS, baseOptions, relation, nullableRef, str };
+module.exports = {
+  mongoose,
+  Schema,
+  ObjectId,
+  ENUMS,
+  baseOptions,
+  relation,
+  nullableRef,
+  wsRef,
+  str,
+};

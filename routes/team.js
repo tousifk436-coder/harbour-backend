@@ -38,8 +38,14 @@ const { emitChange } = require("../utils/realtime");
 // ---------------- Departments ----------------
 router.get(
   "/departments",
-  wrap(async (_req, res) => {
-    res.json((await Department.find().sort({ name: 1 })).map(json));
+  wrap(async (req, res) => {
+    res.json(
+      (
+        await Department.find({ workspace_id: req.user.workspace_id }).sort({
+          name: 1,
+        })
+      ).map(json),
+    );
   }),
 );
 router.post(
@@ -48,8 +54,11 @@ router.post(
     requireSuper(req.user);
     const name = String(req.body.name || "").trim();
     if (!name) throw bad("Department name is required");
-    const d = await Department.create({ name });
-    await ensureDefaultChannels();
+    const d = await Department.create({
+      workspace_id: req.user.workspace_id,
+      name,
+    });
+    await ensureDefaultChannels(req.user.workspace_id);
     emitChange("departments");
     emitChange("chat_channels");
     res.status(201).json(json(d));
@@ -59,10 +68,11 @@ router.post(
 // ---------------- Profiles ----------------
 /** Admins see everyone; others see themselves and their department colleagues. */
 function profileScope(u) {
-  if (isAdmin(u)) return {};
+  const ws = { workspace_id: u.workspace_id }; // never show people from another company
+  if (isAdmin(u)) return ws;
   const or = [{ _id: u._id }];
   if (u.department_id) or.push({ department_id: u.department_id });
-  return { $or: or };
+  return { ...ws, $or: or };
 }
 
 router.get(
@@ -100,12 +110,19 @@ router.post(
         throw forbidden("Admins cannot create super admins");
       department_id = me.department_id || null;
     }
-    if (department_id && !(await Department.exists({ _id: department_id })))
+    if (
+      department_id &&
+      !(await Department.exists({
+        _id: department_id,
+        workspace_id: me.workspace_id,
+      }))
+    )
       throw bad("Department not found");
     if (await User.exists({ email }))
       throw bad("A user with this email address has already been registered");
 
     const u = await User.create({
+      workspace_id: me.workspace_id,
       email,
       password_hash: await bcrypt.hash(password, 10),
       full_name,
@@ -113,7 +130,7 @@ router.post(
       role,
       department_id,
     });
-    await ensureDefaultChannels();
+    await ensureDefaultChannels(me.workspace_id);
     emitChange("profiles");
     emitChange("chat_channels");
     res.status(201).json({ ok: true, user_id: String(u._id) });
@@ -126,7 +143,8 @@ router.patch(
   wrap(async (req, res) => {
     const me = req.user;
     const target = await User.findById(idParam(req.params.id));
-    if (!target) throw notFound();
+    if (!target || !sameId(target.workspace_id, me.workspace_id))
+      throw notFound();
     const self = sameId(target._id, me._id);
     const adminOfDept =
       me.role === "admin" &&
@@ -208,7 +226,7 @@ router.patch(
     target.set(patch);
     await target.save();
     if (membershipChanged) {
-      await ensureDefaultChannels();
+      await ensureDefaultChannels(me.workspace_id);
       emitChange("chat_channels");
     }
     emitChange("profiles");
@@ -228,7 +246,8 @@ router.post(
     const me = req.user;
     requireAdmin(me);
     const target = await User.findById(idParam(req.params.id));
-    if (!target) throw notFound();
+    if (!target || !sameId(target.workspace_id, me.workspace_id))
+      throw notFound();
     if (sameId(target._id, me._id))
       throw bad("Use Settings → Security to change your own password.");
     if (!isSuper(me)) {
@@ -314,12 +333,13 @@ router.get(
     const { leadIds, clientIds } = await visibleIds(u);
     const actMatch = leadIds
       ? {
+          workspace_id: u.workspace_id,
           $or: [
             { lead_id: { $in: leadIds } },
             { client_id: { $in: clientIds } },
           ],
         }
-      : {};
+      : { workspace_id: u.workspace_id };
     const lastAct = await Promise.all(
       people.map((p) =>
         Activity.findOne({ ...actMatch, user_id: p._id })

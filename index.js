@@ -16,8 +16,12 @@ const config = require("./config");
 const { requireAuth } = require("./middleware/auth");
 const { errorHandler } = require("./middleware/error");
 const { initRealtime } = require("./utils/realtime");
-const { ensureDefaultChannels } = require("./utils/channels");
+const { ensureAllWorkspaceChannels } = require("./utils/channels");
 const { ensureOwner } = require("./utils/ensureOwner");
+const {
+  ensureWorkspacesMigrated,
+  fixLegacyIndexes,
+} = require("./utils/bootstrap");
 const { startReminderJob } = require("./jobs/reminders");
 
 // ---------------- CORS: public — any website or app may call this API ----------------
@@ -86,6 +90,7 @@ app.use("/api", require("./routes/records")); // activities, documents, payments
 app.use("/api", require("./routes/workspace")); // todos, notes, calendar, dashboard, module counts
 app.use("/api/chat", require("./routes/chat"));
 app.use("/api/integrations", require("./routes/integrations"));
+app.use("/api/platform", require("./routes/platform")); // owner-only: manage companies
 
 app.use("/api", (_req, res) =>
   res.status(404).json({ error: "Not found", code: "not_found" }),
@@ -99,8 +104,10 @@ async function start() {
   console.log(
     `MongoDB connected: ${config.mongoUri.replace(/\/\/[^@]*@/, "//***@")}`,
   );
-  await ensureDefaultChannels();
+  await fixLegacyIndexes(); // drop obsolete global indexes from older databases
+  await ensureWorkspacesMigrated(); // one-time auto-upgrade of older single-company data
   await ensureOwner();
+  await ensureAllWorkspaceChannels();
 
   const server = http.createServer(app);
   initRealtime(server, corsOptions);

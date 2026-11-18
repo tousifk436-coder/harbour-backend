@@ -2,7 +2,7 @@ const router = require("express").Router();
 const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 const config = require("../config");
-const { User } = require("../models");
+const { User, Workspace } = require("../models");
 const { signToken, requireAuth } = require("../middleware/auth");
 const { wrap, bad, HttpError, json } = require("../utils/http");
 const { sendMail } = require("../utils/mail");
@@ -47,6 +47,17 @@ router.post(
         "Your account has been deactivated. Contact your administrator.",
         "inactive",
       );
+    if (user.is_owner !== true && user.workspace_id) {
+      const ws = await Workspace.findById(user.workspace_id)
+        .select("is_active")
+        .lean();
+      if (ws && ws.is_active === false)
+        throw new HttpError(
+          403,
+          "This company's access has been suspended. Please contact support.",
+          "workspace_suspended",
+        );
+    }
     const profile = await profileOf(user._id);
     res.json({ token: signToken(user), user: json(profile) });
   }),

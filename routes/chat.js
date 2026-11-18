@@ -33,6 +33,7 @@ router.get(
   "/people",
   wrap(async (req, res) => {
     const rows = await User.find({
+      workspace_id: req.user.workspace_id,
       is_active: true,
       _id: { $ne: req.user._id },
     })
@@ -83,6 +84,7 @@ router.post(
     )
       throw forbidden("You cannot share that record.");
     const m = await ChatMessage.create({
+      workspace_id: req.user.workspace_id,
       channel_id: cid,
       user_id: req.user._id,
       body,
@@ -106,7 +108,7 @@ router.delete(
   "/messages/:id",
   wrap(async (req, res) => {
     const m = await ChatMessage.findById(idParam(req.params.id));
-    if (!m) throw notFound();
+    if (!m || !sameId(m.workspace_id, req.user.workspace_id)) throw notFound();
     if (!sameId(m.user_id, req.user._id) && !isAdmin(req.user))
       throw forbidden();
     await m.deleteOne();
@@ -138,13 +140,20 @@ router.post(
     const me = req.user._id;
     const other = oid(req.body.user_id);
     if (!other || sameId(other, me)) throw bad("Invalid user");
-    if (!(await User.exists({ _id: other, is_active: true })))
+    if (
+      !(await User.exists({
+        _id: other,
+        is_active: true,
+        workspace_id: req.user.workspace_id,
+      }))
+    )
       throw bad("User not found");
     const key = [String(me), String(other)].sort().join(":");
     let ch = await ChatChannel.findOne({ direct_key: key });
     if (!ch) {
       try {
         ch = await ChatChannel.create({
+          workspace_id: req.user.workspace_id,
           type: "direct",
           direct_key: key,
           created_by: me,
@@ -154,7 +163,7 @@ router.post(
           ch = await ChatChannel.findOne({ direct_key: key });
         else throw e;
       }
-      await addMembers(ch._id, [me, other]);
+      await addMembers(ch._id, req.user.workspace_id, [me, other]);
       emitChange("chat_channels", {}, [me, other]);
     }
     res.json({ id: String(ch._id) });
@@ -173,14 +182,16 @@ router.post(
     const valid = await User.find({
       _id: { $in: ids },
       is_active: true,
+      workspace_id: req.user.workspace_id,
     }).distinct("_id");
     const members = [req.user._id, ...valid];
     const ch = await ChatChannel.create({
+      workspace_id: req.user.workspace_id,
       type: "group",
       name,
       created_by: req.user._id,
     });
-    await addMembers(ch._id, members);
+    await addMembers(ch._id, req.user.workspace_id, members);
     emitChange("chat_channels", {}, members);
     res.status(201).json({ id: String(ch._id) });
   }),

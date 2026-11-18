@@ -14,7 +14,12 @@ const {
   pick,
   json,
 } = require("../utils/http");
-const { isAdmin, assertParent, parentDepartment } = require("../utils/access");
+const {
+  isAdmin,
+  assertParent,
+  parentDepartment,
+  parentWorkspace,
+} = require("../utils/access");
 const { logActivity } = require("../utils/activity");
 const { removeFiles } = require("../utils/cascade");
 const { saveFile, openFile, deleteFiles } = require("../utils/files");
@@ -169,6 +174,7 @@ router.post(
     let doc;
     try {
       doc = await Document.create({
+        workspace_id: await parentWorkspace(lead_id, client_id),
         lead_id,
         client_id,
         name,
@@ -331,9 +337,12 @@ router.post(
     if (!data.due_at) data.due_at = null;
     if (!data.description) data.description = null;
     if (data.status === "paid" && !data.paid_at) data.paid_at = new Date();
-    const c = await Client.findById(client).select("department_id").lean();
+    const c = await Client.findById(client)
+      .select("department_id workspace_id")
+      .lean();
     const p = await Payment.create({
       ...data,
+      workspace_id: c?.workspace_id,
       client_id: client,
       department_id: c?.department_id ?? null,
       created_by: req.user._id,

@@ -12,30 +12,39 @@ const isSuper = (u) => u.role === "super_admin";
 
 /** Mongo filter that limits a query on leads/clients/follow-ups/tasks/notes to what `u` may see. */
 function scopeFilter(u) {
-  if (u.role === "super_admin") return {};
+  const ws = { workspace_id: u.workspace_id }; // company boundary — applied to every role
+  if (u.role === "super_admin") return ws;
   if (u.role === "admin") {
-    return u.department_id ? { department_id: { $in: [null, u.department_id] } } : { department_id: null };
+    return u.department_id
+      ? { ...ws, department_id: { $in: [null, u.department_id] } }
+      : { ...ws, department_id: null };
   }
-  return { $or: [{ assigned_to: u._id }, { created_by: u._id }] };
+  return { ...ws, $or: [{ assigned_to: u._id }, { created_by: u._id }] };
 }
 
 /** Same rule as scopeFilter, for a single loaded record. */
 function canAccess(u, rec) {
   if (!rec) return false;
+  if (!sameId(rec.workspace_id, u.workspace_id)) return false; // different company: always denied
   if (u.role === "super_admin") return true;
-  if (u.role === "admin") return rec.department_id == null || sameId(rec.department_id, u.department_id);
+  if (u.role === "admin")
+    return (
+      rec.department_id == null || sameId(rec.department_id, u.department_id)
+    );
   return sameId(rec.assigned_to, u._id) || sameId(rec.created_by, u._id);
 }
 
 /** Can `u` assign work to user `targetId`? */
 async function canAssignTo(u, targetId) {
   if (!targetId) return true;
+  const t = await User.findById(targetId)
+    .select("department_id workspace_id")
+    .lean();
+  if (!t || !sameId(t.workspace_id, u.workspace_id)) return false; // must belong to the same company
   if (u.role === "super_admin") return true;
   if (sameId(targetId, u._id)) return true;
-  if (u.role === "admin") {
-    const t = await User.findById(targetId).select("department_id").lean();
-    return !!t && t.department_id != null && sameId(t.department_id, u.department_id);
-  }
+  if (u.role === "admin")
+    return t.department_id != null && sameId(t.department_id, u.department_id);
   return false;
 }
 
@@ -44,12 +53,19 @@ async function canAssignTo(u, targetId) {
  * records always belong to them (an employee cannot assign to someone else).
  */
 async function stampOwnership(u, data, options = {}) {
+  data.workspace_id = u.workspace_id; // every new record belongs to the creator's company
   data.created_by = u._id;
   // Bulk imports may intentionally leave a lead unassigned when the supplied
   // staff name does not match a CRM employee. Manual creation keeps the old fallback.
-  if (u.role === "employee" || (!options.preserveUnassigned && !data.assigned_to)) data.assigned_to = u._id;
+  if (
+    u.role === "employee" ||
+    (!options.preserveUnassigned && !data.assigned_to)
+  )
+    data.assigned_to = u._id;
   if (!data.department_id) {
-    const a = await User.findById(data.assigned_to).select("department_id").lean();
+    const a = await User.findById(data.assigned_to)
+      .select("department_id")
+      .lean();
     data.department_id = (a && a.department_id) || u.department_id || null;
   }
   return data;
@@ -65,23 +81,47 @@ async function loadAccessible(Model, u, id) {
 /** Access for child records (documents, payments, activities) follows the parent lead/client. */
 async function canAccessParent(u, leadId, clientId) {
   if (leadId) {
-    const l = await Lead.findById(leadId).select("department_id assigned_to created_by").lean();
+    const l = await Lead.findById(leadId)
+      .select("department_id assigned_to created_by workspace_id")
+      .lean();
     if (l) return canAccess(u, l);
   }
   if (clientId) {
-    const c = await Client.findById(clientId).select("department_id assigned_to created_by").lean();
+    const c = await Client.findById(clientId)
+      .select("department_id assigned_to created_by workspace_id")
+      .lean();
     if (c) return canAccess(u, c);
   }
   return false;
 }
 async function assertParent(u, leadId, clientId) {
-  if (!(await canAccessParent(u, leadId, clientId))) throw notFound("Record not found or access denied");
+  if (!(await canAccessParent(u, leadId, clientId)))
+    throw notFound("Record not found or access denied");
 }
 
 /** Department inherited from the parent record (client first, then lead). */
 async function parentDepartment(leadId, clientId) {
-  if (clientId) { const c = await Client.findById(clientId).select("department_id").lean(); if (c) return c.department_id; }
-  if (leadId) { const l = await Lead.findById(leadId).select("department_id").lean(); if (l) return l.department_id; }
+  if (clientId) {
+    const c = await Client.findById(clientId).select("department_id").lean();
+    if (c) return c.department_id;
+  }
+  if (leadId) {
+    const l = await Lead.findById(leadId).select("department_id").lean();
+    if (l) return l.department_id;
+  }
+  return null;
+}
+
+/** Workspace inherited from the parent record (client first, then lead). */
+async function parentWorkspace(leadId, clientId) {
+  if (clientId) {
+    const c = await Client.findById(clientId).select("workspace_id").lean();
+    if (c) return c.workspace_id;
+  }
+  if (leadId) {
+    const l = await Lead.findById(leadId).select("workspace_id").lean();
+    if (l) return l.workspace_id;
+  }
   return null;
 }
 
@@ -89,11 +129,33 @@ async function parentDepartment(leadId, clientId) {
 async function visibleIds(u) {
   if (u.role === "super_admin") return { leadIds: null, clientIds: null };
   const f = scopeFilter(u);
-  const [leadIds, clientIds] = await Promise.all([Lead.find(f).distinct("_id"), Client.find(f).distinct("_id")]);
+  const [leadIds, clientIds] = await Promise.all([
+    Lead.find(f).distinct("_id"),
+    Client.find(f).distinct("_id"),
+  ]);
   return { leadIds, clientIds };
 }
 
-function requireAdmin(u) { if (!isAdmin(u)) throw forbidden(); }
-function requireSuper(u) { if (!isSuper(u)) throw forbidden(); }
+function requireAdmin(u) {
+  if (!isAdmin(u)) throw forbidden();
+}
+function requireSuper(u) {
+  if (!isSuper(u)) throw forbidden();
+}
 
-module.exports = { isAdmin, isSuper, scopeFilter, canAccess, canAssignTo, stampOwnership, loadAccessible, canAccessParent, assertParent, parentDepartment, visibleIds, requireAdmin, requireSuper };
+module.exports = {
+  isAdmin,
+  isSuper,
+  scopeFilter,
+  canAccess,
+  canAssignTo,
+  stampOwnership,
+  loadAccessible,
+  canAccessParent,
+  assertParent,
+  parentDepartment,
+  parentWorkspace,
+  visibleIds,
+  requireAdmin,
+  requireSuper,
+};

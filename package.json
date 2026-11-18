@@ -1,16 +1,16 @@
-
 {
   "name": "harbour-crm-backend",
   "version": "1.0.0",
   "private": true,
-  "description": "Harbour CRM API — Node.js + Express + MongoDB",
+  "description": "Harbour CRM API \u2014 Node.js + Express + MongoDB",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "dev": "node --watch index.js",
     "seed": "node scripts/seed.js",
     "create-admin": "node scripts/createAdmin.js",
-    "migrate-lead-stages": "node scripts/migrate-lead-stages.js"
+    "migrate-lead-stages": "node scripts/migrate-lead-stages.js",
+    "create-company": "node scripts/createWorkspace.js"
   },
   "engines": {
     "node": ">=18"

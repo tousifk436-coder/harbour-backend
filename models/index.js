@@ -92,7 +92,8 @@ const leadSchema = new Schema(
     company: str,
     address: str,
     source: { type: String, enum: ENUMS.leadSource, default: "other" },
-    status: { type: String, enum: ENUMS.leadStatus, default: "new_lead" },
+    source_dataset: { type: String, default: null, trim: true, maxlength: 160 },
+    status: { type: String, default: "new_lead", trim: true }, // validated against the workspace's admin-managed LeadStage list
     estimated_value: {
       type: Number,
       default: 0,
@@ -100,6 +101,7 @@ const leadSchema = new Schema(
     },
     notes: str,
     assigned_to: nullableRef("User"),
+    shared_with: { type: [{ type: ObjectId, ref: "User" }], default: [] }, // extra agents who also see/work this lead ("keep in both")
     department_id: nullableRef("Department"),
     created_by: nullableRef("User"),
     converted_client_id: nullableRef("Client"),
@@ -118,8 +120,35 @@ leadSchema.index({ status: 1 });
 leadSchema.index({ created_at: -1 });
 leadSchema.index({ email: 1 });
 leadSchema.index({ phone_digits: 1 });
+leadSchema.index({ shared_with: 1 });
+// Compound indexes on the company boundary — every query filters by workspace_id,
+// so these make the leads list, stage counts and assignee filters fast at scale.
+leadSchema.index({ workspace_id: 1, created_at: -1 });
+leadSchema.index({ workspace_id: 1, status: 1 });
+leadSchema.index({ workspace_id: 1, assigned_to: 1 });
 relation(leadSchema, "assignee", "User", "assigned_to");
 const Lead = mongoose.model("Lead", leadSchema);
+
+// ---------------- Lead stages (admin-managed pipeline) ----------------
+// Stages are no longer hardcoded: each company manages its own list. `key` is a
+// stable slug stored on lead.status and never changes; label/color/position/
+// is_open are freely editable. `role` lets server logic find the semantic
+// stages (new lead / won / junk) even after they are renamed.
+const leadStageSchema = new Schema(
+  {
+    workspace_id: wsRef(),
+    key: { type: String, required: true, trim: true },
+    label: { type: String, required: true, trim: true },
+    color: { type: String, default: "#64748B" },
+    position: { type: Number, default: 0 },
+    is_open: { type: Boolean, default: true },
+    role: { type: String, enum: ["new", "won", "junk", null], default: null },
+  },
+  baseOptions(),
+);
+leadStageSchema.index({ workspace_id: 1, key: 1 }, { unique: true });
+leadStageSchema.index({ workspace_id: 1, position: 1 });
+const LeadStage = mongoose.model("LeadStage", leadStageSchema);
 
 // ---------------- Clients ----------------
 const clientSchema = new Schema(
@@ -151,6 +180,7 @@ const clientSchema = new Schema(
 );
 clientSchema.index({ assigned_to: 1 });
 clientSchema.index({ department_id: 1 });
+clientSchema.index({ workspace_id: 1, created_at: -1 });
 relation(clientSchema, "assignee", "User", "assigned_to");
 const Client = mongoose.model("Client", clientSchema);
 
@@ -179,6 +209,7 @@ const followUpSchema = new Schema(
   baseOptions(),
 );
 followUpSchema.index({ status: 1, due_at: 1 });
+followUpSchema.index({ workspace_id: 1, due_at: 1 });
 followUpSchema.index({ assigned_to: 1 });
 followUpSchema.index({ lead_id: 1 });
 followUpSchema.index({ client_id: 1 });
@@ -207,6 +238,7 @@ const taskSchema = new Schema(
 );
 taskSchema.index({ assigned_to: 1 });
 taskSchema.index({ status: 1 });
+taskSchema.index({ workspace_id: 1, status: 1 });
 relation(taskSchema, "lead", "Lead", "lead_id");
 relation(taskSchema, "client", "Client", "client_id");
 relation(taskSchema, "assignee", "User", "assigned_to");
@@ -416,6 +448,7 @@ module.exports = {
   Department,
   User,
   Lead,
+  LeadStage,
   Client,
   FollowUp,
   Task,

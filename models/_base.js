@@ -18,6 +18,8 @@ const ENUMS = {
     "new_lead",
     "junk",
     "rspv",
+    "not_interested",
+    "hanged_up",
   ],
   leadSource: [
     "website",

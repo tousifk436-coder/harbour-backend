@@ -2,7 +2,7 @@
  * Permission model (enforced on the server for every request):
  *   super_admin : everything, every department
  *   admin       : every record in their own department (+ records with no department)
- *   employee    : only records assigned to them or created by them
+ *   employee    : only records assigned to them, shared with them, or created by them
  */
 const { User, Lead, Client } = require("../models");
 const { sameId, forbidden, notFound } = require("./http");
@@ -19,7 +19,14 @@ function scopeFilter(u) {
       ? { ...ws, department_id: { $in: [null, u.department_id] } }
       : { ...ws, department_id: null };
   }
-  return { ...ws, $or: [{ assigned_to: u._id }, { created_by: u._id }] };
+  return {
+    ...ws,
+    $or: [
+      { assigned_to: u._id },
+      { created_by: u._id },
+      { shared_with: u._id },
+    ],
+  };
 }
 
 /** Same rule as scopeFilter, for a single loaded record. */
@@ -31,7 +38,12 @@ function canAccess(u, rec) {
     return (
       rec.department_id == null || sameId(rec.department_id, u.department_id)
     );
-  return sameId(rec.assigned_to, u._id) || sameId(rec.created_by, u._id);
+  return (
+    sameId(rec.assigned_to, u._id) ||
+    sameId(rec.created_by, u._id) ||
+    (Array.isArray(rec.shared_with) &&
+      rec.shared_with.some((x) => sameId(x, u._id)))
+  );
 }
 
 /** Can `u` assign work to user `targetId`? */

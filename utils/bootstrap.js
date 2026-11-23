@@ -9,6 +9,7 @@ const bcrypt = require("bcryptjs");
 const models = require("../models");
 const { Workspace, User, Department } = models;
 const { ensureDefaultChannels } = require("./channels");
+const { seedStagesForWorkspace } = require("./stages");
 
 // every collection that holds company data and must carry workspace_id
 const TENANT_MODELS = [
@@ -79,6 +80,7 @@ async function createWorkspace({ companyName, email, password, fullName }) {
     role: "super_admin",
   });
   await ensureDefaultChannels(workspace._id);
+  await seedStagesForWorkspace(workspace._id);
   return { workspace, user };
 }
 

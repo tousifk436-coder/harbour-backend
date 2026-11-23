@@ -68,7 +68,7 @@ router.post(
 // ---------------- Profiles ----------------
 /** Admins see everyone; others see themselves and their department colleagues. */
 function profileScope(u) {
-  const ws = { workspace_id: u.workspace_id }; // never show people from another company
+  const ws = { workspace_id: u.workspace_id };
   if (isAdmin(u)) return ws;
   const or = [{ _id: u._id }];
   if (u.department_id) or.push({ department_id: u.department_id });
@@ -239,7 +239,6 @@ router.patch(
 );
 
 // POST /api/profiles/:id/password { password } -> admin sets a new password for someone.
-// Super admin: anyone. Admin: employees of their own department. Signs that person out everywhere.
 router.post(
   "/profiles/:id/password",
   wrap(async (req, res) => {
@@ -265,6 +264,139 @@ router.post(
     target.token_version = (target.token_version || 0) + 1;
     await target.save();
     res.json({ ok: true });
+  }),
+);
+
+// Permanently remove an employee account only when no business records still reference it.
+router.delete(
+  "/profiles/:id",
+  wrap(async (req, res) => {
+    requireAdmin(req.user);
+    const target = await User.findOne({
+      _id: idParam(req.params.id),
+      workspace_id: req.user.workspace_id,
+    });
+    if (!target) throw notFound();
+    if (sameId(target._id, req.user._id))
+      throw forbidden("You cannot delete your own account.");
+    if (target.is_owner || target.role === "super_admin")
+      throw forbidden("Owner and super admin accounts cannot be deleted.");
+    if (
+      !isSuper(req.user) &&
+      !(
+        target.role === "employee" &&
+        sameId(target.department_id, req.user.department_id)
+      )
+    )
+      throw forbidden("You can only delete employees in your department.");
+    const models = [
+      [Lead, ["assigned_to", "shared_with", "created_by"]],
+      [Client, ["assigned_to", "created_by"]],
+      [FollowUp, ["assigned_to", "created_by", "attendees"]],
+      [Task, ["assigned_to", "created_by"]],
+      [Activity, ["user_id"]],
+    ];
+    for (const [Model, fields] of models) {
+      if (
+        await Model.exists({
+          workspace_id: req.user.workspace_id,
+          $or: fields.map((field) => ({ [field]: target._id })),
+        })
+      )
+        throw bad(
+          "This employee has associated CRM records. Reassign their leads and work first; historical activity must be retained. Deactivate the account instead if needed.",
+        );
+    }
+    await target.deleteOne();
+    await ensureDefaultChannels(req.user.workspace_id);
+    emitChange("profiles");
+    emitChange("chat_channels");
+    res.json({ ok: true });
+  }),
+);
+
+// Reports are based on recorded CRM activity.
+router.get(
+  "/reports/agent-outreach",
+  wrap(async (req, res) => {
+    requireAdmin(req.user);
+    const start = new Date(String(req.query.from || ""));
+    const end = new Date(String(req.query.to || ""));
+    if (
+      Number.isNaN(+start) ||
+      Number.isNaN(+end) ||
+      start > end ||
+      +end - +start > 366 * 86400000
+    )
+      throw bad("Select a valid date range of up to 366 days.");
+    const scope = profileScope(req.user);
+    const people = await User.find(scope)
+      .select("full_name email role is_active")
+      .lean();
+    const ids = people.map((p) => p._id);
+    const leadCounts = await Lead.aggregate([
+      {
+        $match: {
+          workspace_id: req.user.workspace_id,
+          assigned_to: { $in: ids },
+        },
+      },
+      { $group: { _id: "$assigned_to", count: { $sum: 1 } } },
+    ]);
+    const leadMap = Object.fromEntries(
+      leadCounts.map((x) => [String(x._id), x.count]),
+    );
+    const calls = await Activity.find({
+      workspace_id: req.user.workspace_id,
+      user_id: { $in: ids },
+      type: "call",
+      created_at: { $gte: start, $lte: end },
+    })
+      .select("user_id created_at lead_id client_id")
+      .lean();
+    const followups = await FollowUp.find({
+      workspace_id: req.user.workspace_id,
+      assigned_to: { $in: ids },
+      type: "call",
+      status: "done",
+      completed_at: { $gte: start, $lte: end },
+    })
+      .select("assigned_to completed_at")
+      .lean();
+    const rows = people.map((p) => ({
+      id: String(p._id),
+      full_name: p.full_name,
+      email: p.email,
+      role: p.role,
+      is_active: p.is_active,
+      leads_assigned: leadMap[String(p._id)] || 0,
+      logged_calls: 0,
+      completed_call_followups: 0,
+      unique_leads_contacted: 0,
+      hourly: Array.from({ length: 24 }, (_, hour) => ({ hour, calls: 0 })),
+    }));
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+    const contacted = {};
+    for (const c of calls) {
+      const id = String(c.user_id),
+        r = byId[id];
+      if (!r) continue;
+      r.logged_calls++;
+      r.hourly[new Date(c.created_at).getUTCHours()].calls++;
+      if (c.lead_id) (contacted[id] ||= new Set()).add(String(c.lead_id));
+    }
+    for (const c of followups) {
+      const r = byId[String(c.assigned_to)];
+      if (r) r.completed_call_followups++;
+    }
+    for (const r of rows) r.unique_leads_contacted = contacted[r.id]?.size || 0;
+    res.json({
+      from: start.toISOString(),
+      to: end.toISOString(),
+      timezone: "UTC",
+      source: "CRM logged call activities",
+      rows,
+    });
   }),
 );
 
@@ -307,7 +439,6 @@ router.get(
       countBy(Task, { status: { $ne: "done" } }),
     ]);
 
-    // revenue collected on each person's visible clients
     const visibleClients = await Client.find(scope)
       .select("_id assigned_to")
       .lean();
@@ -329,7 +460,6 @@ router.get(
       if (o) revenue[o] = (revenue[o] || 0) + p.s;
     }
 
-    // last activity on records the caller can see
     const { leadIds, clientIds } = await visibleIds(u);
     const actMatch = leadIds
       ? {

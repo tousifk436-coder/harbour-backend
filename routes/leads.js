@@ -1,5 +1,5 @@
 const router = require("express").Router();
-const { Lead, Client, Activity, ENUMS } = require("../models");
+const { Lead, LeadStage, Client, Activity, ENUMS } = require("../models");
 const {
   wrap,
   bad,
@@ -31,6 +31,7 @@ const FIELDS = [
   "company",
   "address",
   "source",
+  "source_dataset",
   "status",
   "estimated_value",
   "notes",
@@ -49,6 +50,31 @@ const SORTABLE = [
   "email",
 ];
 const ASSIGNEE = { path: "assignee", select: "full_name" };
+const SHARED = { path: "shared_with", select: "full_name" };
+
+// Stages are admin-managed per company (LeadStage). These helpers validate a
+// lead's status against the company's stage list and find semantic stages.
+async function stageKeySet(ws) {
+  const rows = await LeadStage.find({ workspace_id: ws }).select("key").lean();
+  return new Set(rows.map((r) => r.key));
+}
+async function defaultStageKey(ws) {
+  const s =
+    (await LeadStage.findOne({ workspace_id: ws, role: "new" })
+      .select("key")
+      .lean()) ||
+    (await LeadStage.findOne({ workspace_id: ws })
+      .sort({ position: 1 })
+      .select("key")
+      .lean());
+  return s ? s.key : "new_lead";
+}
+async function wonStageKey(ws) {
+  const s = await LeadStage.findOne({ workspace_id: ws, role: "won" })
+    .select("key")
+    .lean();
+  return s ? s.key : "sale_done";
+}
 
 function clean(body, u) {
   const d = blankToNull(pick(body, [...FIELDS, "department_id"]), TEXT);
@@ -81,6 +107,7 @@ router.get(
     ];
     if (q.status) and.push({ status: q.status });
     if (q.source) and.push({ source: q.source });
+    if (q.source_dataset) and.push({ source_dataset: q.source_dataset });
     if (q.assigned_to) and.push({ assigned_to: oid(q.assigned_to) });
     const filter = { $and: and };
     const sortField = SORTABLE.includes(q.sort) ? q.sort : "created_at";
@@ -89,7 +116,8 @@ router.get(
         .sort({ [sortField]: q.dir === "asc" ? 1 : -1, _id: -1 })
         .skip(page * size)
         .limit(size)
-        .populate(ASSIGNEE),
+        .populate(ASSIGNEE)
+        .populate(SHARED),
       Lead.countDocuments(filter),
     ]);
     res.json({ rows: rows.map(json), count });
@@ -108,12 +136,68 @@ router.get(
   }),
 );
 
+// POST /api/leads/bulk-assign
+//   body: { ids?: string[], all?: boolean,
+//           filter?: { search, status, source, assigned_to },
+//           assigned_to: string, mode: "transfer" | "share" }
+router.post(
+  "/bulk-assign",
+  wrap(async (req, res) => {
+    const { ids, all, filter: f = {}, assigned_to, mode } = req.body || {};
+    const target = oid(assigned_to);
+    if (!target) throw bad("Pick an agent to assign to.");
+    if (mode !== "transfer" && mode !== "share")
+      throw bad("Invalid assign mode.");
+    if (!(await canAssignTo(req.user, target)))
+      throw forbidden("You cannot assign leads to that person.");
+
+    // Always limited to the leads this user is allowed to see (company + role).
+    const and = [scopeFilter(req.user)];
+    if (all) {
+      and.push(searchFilter(f.search, ["name", "email", "phone", "company"]));
+      if (f.status) and.push({ status: f.status });
+      if (f.source) and.push({ source: f.source });
+      if (f.source_dataset) and.push({ source_dataset: f.source_dataset });
+      if (f.assigned_to) and.push({ assigned_to: oid(f.assigned_to) });
+    } else {
+      const list = (Array.isArray(ids) ? ids : []).map(oid).filter(Boolean);
+      if (!list.length) throw bad("No leads selected.");
+      and.push({ _id: { $in: list } });
+    }
+
+    let result;
+    if (mode === "transfer") {
+      // Move ownership to the target. Stage/history untouched.
+      // Also drop the target from the co-assignee list if present.
+      result = await Lead.updateMany(
+        { $and: and },
+        { $set: { assigned_to: target }, $pull: { shared_with: target } },
+      );
+    } else {
+      // "Keep in both": current owner stays; target added as a co-assignee
+      // (skip leads the target already owns).
+      result = await Lead.updateMany(
+        { $and: [...and, { assigned_to: { $ne: target } }] },
+        { $addToSet: { shared_with: target } },
+      );
+    }
+
+    emitChange("leads");
+    res.json({
+      ok: true,
+      modified: result.modifiedCount ?? result.nModified ?? 0,
+    });
+  }),
+);
+
 // POST /api/leads/import { rows: [...] } -> { count }
 router.post(
   "/import",
   wrap(async (req, res) => {
     const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
     if (rows.length > 5000) throw bad("Import at most 5000 rows at a time");
+    const stageKeys = await stageKeySet(req.user.workspace_id);
+    const defKey = await defaultStageKey(req.user.workspace_id);
     let count = 0;
     for (const r of rows) {
       const name = String(r.name || "").trim();
@@ -127,7 +211,11 @@ router.post(
         company: r.company || null,
         address: r.address || null,
         source: ENUMS.leadSource.includes(r.source) ? r.source : "other",
-        status: ENUMS.leadStatus.includes(r.status) ? r.status : "new_lead",
+        source_dataset:
+          String(req.body.dataset_name || r.source_dataset || "")
+            .trim()
+            .slice(0, 160) || null,
+        status: stageKeys.has(r.status) ? r.status : defKey,
         estimated_value:
           Number(r.estimated_value) > 0 ? Number(r.estimated_value) : 0,
         notes: r.notes || null,
@@ -160,6 +248,7 @@ router.get(
   wrap(async (req, res) => {
     const lead = await loadAccessible(Lead, req.user, idParam(req.params.id));
     await lead.populate(ASSIGNEE);
+    await lead.populate(SHARED);
     res.json(json(lead));
   }),
 );
@@ -169,6 +258,12 @@ router.post(
   wrap(async (req, res) => {
     const data = clean(req.body, req.user);
     if (!data.name) throw bad("Name is required");
+    if (data.status) {
+      const keys = await stageKeySet(req.user.workspace_id);
+      if (!keys.has(data.status)) throw bad("Unknown lead stage.");
+    } else {
+      data.status = await defaultStageKey(req.user.workspace_id);
+    }
     if (data.assigned_to && !(await canAssignTo(req.user, data.assigned_to)))
       throw forbidden("You cannot assign this lead to that person.");
     await stampOwnership(req.user, data);
@@ -192,6 +287,10 @@ router.patch(
     const lead = await loadAccessible(Lead, req.user, idParam(req.params.id));
     const data = clean(req.body, req.user);
     if ("name" in data && !data.name) throw bad("Name is required");
+    if ("status" in data && data.status) {
+      const keys = await stageKeySet(req.user.workspace_id);
+      if (!keys.has(data.status)) throw bad("Unknown lead stage.");
+    }
     const old = { status: lead.status, assigned_to: lead.assigned_to };
     if (
       "assigned_to" in data &&
@@ -274,21 +373,22 @@ router.post(
       created_by: req.user._id,
     });
     // atomic guard against double conversion
+    const won = await wonStageKey(req.user.workspace_id);
     const updated = await Lead.findOneAndUpdate(
       { _id: lead._id, converted_client_id: null },
-      { $set: { status: "sale_done", converted_client_id: client._id } },
+      { $set: { status: won, converted_client_id: client._id } },
       { new: true },
     );
     if (!updated) {
       await Client.deleteOne({ _id: client._id });
       throw bad("Lead has already been converted");
     }
-    if (lead.status !== "sale_done") {
+    if (lead.status !== won) {
       await logActivity({
         lead_id: lead._id,
         type: "status_change",
-        title: `Status changed from ${lead.status} to sale_done`,
-        metadata: { from: lead.status, to: "sale_done" },
+        title: `Status changed from ${lead.status} to ${won}`,
+        metadata: { from: lead.status, to: won },
         user_id: req.user._id,
         department_id: lead.department_id,
       });
@@ -304,6 +404,28 @@ router.post(
     emitChange("leads");
     emitChange("clients");
     res.json(json(client));
+  }),
+);
+
+// POST /api/leads/:id/log-call
+// Records an outbound call so the agent-outreach report has real data.
+// Called by the app the moment an agent taps "Call" on a lead.
+router.post(
+  "/:id/log-call",
+  wrap(async (req, res) => {
+    const lead = await loadAccessible(Lead, req.user, idParam(req.params.id));
+    await logActivity({
+      lead_id: lead._id,
+      type: "call",
+      title: "Outbound call",
+      user_id: req.user._id,
+      department_id: lead.department_id,
+      workspace_id: lead.workspace_id,
+    });
+    lead.last_contacted_at = new Date();
+    await lead.save();
+    emitChange("leads");
+    res.json({ ok: true });
   }),
 );
 

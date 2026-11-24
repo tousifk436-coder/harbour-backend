@@ -415,7 +415,7 @@ router.get(
     // A readable log of the most recent calls: who called, whom, and when.
     const recent = [...calls]
       .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
-      .slice(0, 100);
+      .slice(0, 500);
     const leadIds = recent.filter((c) => c.lead_id).map((c) => c.lead_id);
     const clientIds = recent.filter((c) => c.client_id).map((c) => c.client_id);
     const [leadsN, clientsN] = await Promise.all([
@@ -455,6 +455,143 @@ router.get(
       source: "CRM logged call activities",
       rows,
       recent_calls,
+    });
+  }),
+);
+
+// Paginated, filterable log of individual calls — powers the Reports
+// "Recent calls" table so it can page through the full history (not just
+// the latest 500). Scoped exactly like the agent report above.
+router.get(
+  "/reports/calls",
+  wrap(async (req, res) => {
+    requireAdmin(req.user);
+    const start = new Date(String(req.query.from || ""));
+    const end = new Date(String(req.query.to || ""));
+    if (
+      Number.isNaN(+start) ||
+      Number.isNaN(+end) ||
+      start > end ||
+      +end - +start > 366 * 86400000
+    )
+      throw bad("Select a valid date range of up to 366 days.");
+
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const pageSize = Math.min(
+      100,
+      Math.max(1, parseInt(req.query.pageSize, 10) || 20),
+    );
+
+    // Same people scope as the agent report (super admins excluded).
+    const scope = profileScope(req.user);
+    const people = (
+      await User.find(scope).select("full_name role").lean()
+    ).filter((p) => p.role !== "super_admin");
+    const nameById = Object.fromEntries(
+      people.map((p) => [String(p._id), p.full_name]),
+    );
+    let ids = people.map((p) => p._id);
+
+    // Agent filter (by user id) — must stay inside the viewer's scope.
+    const agentId = String(req.query.agent || "").trim();
+    if (agentId) ids = ids.filter((id) => String(id) === agentId);
+
+    const and = [
+      { workspace_id: req.user.workspace_id },
+      { type: "call" },
+      { user_id: { $in: ids } },
+      { created_at: { $gte: start, $lte: end } },
+    ];
+
+    // Type filter: Lead vs Customer.
+    const type = String(req.query.type || "").toLowerCase();
+    if (type === "lead") and.push({ lead_id: { $ne: null } });
+    else if (type === "customer") and.push({ client_id: { $ne: null } });
+
+    // Outcome filter.
+    const outcome = String(req.query.outcome || "").toLowerCase();
+    if (outcome === "answered" || outcome === "not_answered")
+      and.push({ "metadata.outcome": outcome });
+    else if (outcome === "none")
+      and.push({
+        $or: [
+          { "metadata.outcome": null },
+          { "metadata.outcome": { $exists: false } },
+        ],
+      });
+
+    // Name search — matches the contact (lead/customer) or the caller's name.
+    const q = String(req.query.q || "").trim();
+    if (q) {
+      const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+      const [leadsM, clientsM] = await Promise.all([
+        Lead.find({ workspace_id: req.user.workspace_id, name: rx })
+          .select("_id")
+          .lean(),
+        Client.find({ workspace_id: req.user.workspace_id, name: rx })
+          .select("_id")
+          .lean(),
+      ]);
+      const matchUserIds = people
+        .filter((p) => rx.test(p.full_name || ""))
+        .map((p) => p._id);
+      and.push({
+        $or: [
+          { lead_id: { $in: leadsM.map((l) => l._id) } },
+          { client_id: { $in: clientsM.map((c) => c._id) } },
+          { user_id: { $in: matchUserIds } },
+        ],
+      });
+    }
+
+    const match = { $and: and };
+    const total = await Activity.countDocuments(match);
+    const docs = await Activity.find(match)
+      .select("user_id created_at lead_id client_id metadata")
+      .sort({ created_at: -1 })
+      .skip((page - 1) * pageSize)
+      .limit(pageSize)
+      .lean();
+
+    // Resolve contact names for just this page.
+    const leadIds = docs.filter((c) => c.lead_id).map((c) => c.lead_id);
+    const clientIds = docs.filter((c) => c.client_id).map((c) => c.client_id);
+    const [leadsN, clientsN] = await Promise.all([
+      Lead.find({ _id: { $in: leadIds } })
+        .select("name")
+        .lean(),
+      Client.find({ _id: { $in: clientIds } })
+        .select("name")
+        .lean(),
+    ]);
+    const leadName = Object.fromEntries(
+      leadsN.map((l) => [String(l._id), l.name]),
+    );
+    const clientName = Object.fromEntries(
+      clientsN.map((c) => [String(c._id), c.name]),
+    );
+
+    const rows = docs.map((c) => ({
+      agent: nameById[String(c.user_id)] || "—",
+      contact: c.lead_id
+        ? leadName[String(c.lead_id)] || "Lead"
+        : c.client_id
+          ? clientName[String(c.client_id)] || "Customer"
+          : "—",
+      kind: c.lead_id ? "Lead" : c.client_id ? "Customer" : "—",
+      lead_id: c.lead_id ? String(c.lead_id) : null,
+      client_id: c.client_id ? String(c.client_id) : null,
+      at: c.created_at,
+      outcome: c.metadata?.outcome || null,
+      duration_seconds: Number(c.metadata?.duration_seconds) || 0,
+    }));
+
+    res.json({
+      rows,
+      total,
+      page,
+      pageSize,
+      pages: Math.max(1, Math.ceil(total / pageSize)),
     });
   }),
 );

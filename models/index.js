@@ -334,6 +334,8 @@ const activitySchema = new Schema(
 activitySchema.index({ lead_id: 1, created_at: -1 });
 activitySchema.index({ client_id: 1, created_at: -1 });
 activitySchema.index({ user_id: 1, created_at: -1 });
+// Powers the Reports "Recent calls" log (filter by workspace + type, newest first).
+activitySchema.index({ workspace_id: 1, type: 1, created_at: -1 });
 relation(activitySchema, "user", "User", "user_id");
 const Activity = mongoose.model("Activity", activitySchema);
 

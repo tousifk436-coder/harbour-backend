@@ -441,6 +441,8 @@ router.get(
           ? clientName[String(c.client_id)] || "Customer"
           : "—",
       kind: c.lead_id ? "Lead" : c.client_id ? "Customer" : "—",
+      lead_id: c.lead_id ? String(c.lead_id) : null,
+      client_id: c.client_id ? String(c.client_id) : null,
       at: c.created_at,
       outcome: c.metadata?.outcome || null, // "answered" | "not_answered" | null
       duration_seconds: Number(c.metadata?.duration_seconds) || 0,

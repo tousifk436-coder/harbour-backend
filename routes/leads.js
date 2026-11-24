@@ -1,5 +1,13 @@
 const router = require("express").Router();
-const { Lead, LeadStage, Client, Activity, ENUMS } = require("../models");
+const {
+  Lead,
+  LeadStage,
+  Client,
+  Activity,
+  User,
+  EMAIL_RE,
+  digits,
+} = require("../models");
 const {
   wrap,
   bad,
@@ -23,6 +31,7 @@ const {
 const { logActivity } = require("../utils/activity");
 const { deleteLeadCascade } = require("../utils/cascade");
 const { emitChange } = require("../utils/realtime");
+const { masterKeySet } = require("../utils/masters");
 
 const FIELDS = [
   "name",
@@ -87,6 +96,26 @@ function clean(body, u) {
   return d;
 }
 
+// Normalise + permission-check the optional co-assignee list ("+1" sharing).
+// Returns undefined when the caller didn't send shared_with (leave it untouched),
+// otherwise an array of ObjectIds the caller is allowed to assign to.
+async function resolveShared(u, body, primaryId) {
+  if (!("shared_with" in body)) return undefined;
+  const raw = Array.isArray(body.shared_with) ? body.shared_with : [];
+  const ids = [...new Set(raw.map((x) => (x && x.id) || x).map(String))]
+    .map(oid)
+    .filter(Boolean)
+    .filter((id) => !primaryId || String(id) !== String(primaryId));
+  const ok = [];
+  for (const id of ids) {
+    // eslint-disable-next-line no-await-in-loop
+    if (!(await canAssignTo(u, id)))
+      throw forbidden("You cannot share this lead with that person.");
+    ok.push(id);
+  }
+  return ok;
+}
+
 function searchFilter(search, fields) {
   const s = String(search || "").trim();
   if (!s) return {};
@@ -108,7 +137,18 @@ router.get(
     if (q.status) and.push({ status: q.status });
     if (q.source) and.push({ source: q.source });
     if (q.source_dataset) and.push({ source_dataset: q.source_dataset });
-    if (q.assigned_to) and.push({ assigned_to: oid(q.assigned_to) });
+    // Filter by a person = leads they OWN, are CO-ASSIGNED (shared) on, or
+    // CREATED/IMPORTED. So the person who imported a batch can filter to it even
+    // before anyone is assigned. The special value "unassigned" lists leads with
+    // no owner yet, so admins can find and distribute them.
+    if (q.assigned_to === "unassigned") {
+      and.push({ assigned_to: null });
+    } else if (q.assigned_to) {
+      const aid = oid(q.assigned_to);
+      and.push({
+        $or: [{ assigned_to: aid }, { shared_with: aid }, { created_by: aid }],
+      });
+    }
     const filter = { $and: and };
     const sortField = SORTABLE.includes(q.sort) ? q.sort : "created_at";
     const [rows, count] = await Promise.all([
@@ -158,7 +198,18 @@ router.post(
       if (f.status) and.push({ status: f.status });
       if (f.source) and.push({ source: f.source });
       if (f.source_dataset) and.push({ source_dataset: f.source_dataset });
-      if (f.assigned_to) and.push({ assigned_to: oid(f.assigned_to) });
+      if (f.assigned_to === "unassigned") {
+        and.push({ assigned_to: null });
+      } else if (f.assigned_to) {
+        const aid = oid(f.assigned_to);
+        and.push({
+          $or: [
+            { assigned_to: aid },
+            { shared_with: aid },
+            { created_by: aid },
+          ],
+        });
+      }
     } else {
       const list = (Array.isArray(ids) ? ids : []).map(oid).filter(Boolean);
       if (!list.length) throw bad("No leads selected.");
@@ -174,12 +225,31 @@ router.post(
         { $set: { assigned_to: target }, $pull: { shared_with: target } },
       );
     } else {
-      // "Keep in both": current owner stays; target added as a co-assignee
-      // (skip leads the target already owns).
-      result = await Lead.updateMany(
-        { $and: [...and, { assigned_to: { $ne: target } }] },
+      // "Keep in both": a lead needs a real owner before it can be "shared".
+      //  - Leads with no owner yet (e.g. just imported): this is their FIRST
+      //    assignment, so simply set the owner — no phantom "+1" on an
+      //    otherwise-unassigned lead.
+      //  - Leads that already have a different owner: keep that owner and add
+      //    the target as a co-assignee.
+      const firstAssign = await Lead.updateMany(
+        { $and: [...and, { assigned_to: null }] },
+        { $set: { assigned_to: target }, $pull: { shared_with: target } },
+      );
+      const coAssign = await Lead.updateMany(
+        {
+          $and: [
+            ...and,
+            { assigned_to: { $ne: null } },
+            { assigned_to: { $ne: target } },
+          ],
+        },
         { $addToSet: { shared_with: target } },
       );
+      result = {
+        modifiedCount:
+          (firstAssign.modifiedCount ?? firstAssign.nModified ?? 0) +
+          (coAssign.modifiedCount ?? coAssign.nModified ?? 0),
+      };
     }
 
     emitChange("leads");
@@ -196,50 +266,110 @@ router.post(
   wrap(async (req, res) => {
     const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
     if (rows.length > 5000) throw bad("Import at most 5000 rows at a time");
-    const stageKeys = await stageKeySet(req.user.workspace_id);
-    const defKey = await defaultStageKey(req.user.workspace_id);
-    let count = 0;
+    const me = req.user;
+    const ws = me.workspace_id;
+    const stageKeys = await stageKeySet(ws);
+    const defKey = await defaultStageKey(ws);
+    const sourceKeys = await masterKeySet(ws, "lead_source");
+    const dataset =
+      String(req.body.dataset_name || "")
+        .trim()
+        .slice(0, 160) || null;
+
+    // Load every assigned user once, so the loop below does no per-row DB calls.
+    const wantedIds = [
+      ...new Set(
+        rows
+          .map((r) => oid(r.assigned_to))
+          .filter(Boolean)
+          .map(String),
+      ),
+    ];
+    const users = wantedIds.length
+      ? await User.find({ _id: { $in: wantedIds }, workspace_id: ws })
+          .select("department_id role")
+          .lean()
+      : [];
+    const userMap = new Map(users.map((u) => [String(u._id), u]));
+    const canAssign = (target) => {
+      const u = target && userMap.get(String(target));
+      if (!u) return false;
+      if (me.role === "super_admin") return true;
+      if (sameId(target, me._id)) return true;
+      if (me.role === "admin")
+        return (
+          u.department_id != null && sameId(u.department_id, me.department_id)
+        );
+      return false;
+    };
+
+    // Build all lead documents in memory (phone_digits/email handled manually
+    // because insertMany bypasses the save hook).
+    const docs = [];
     for (const r of rows) {
-      const name = String(r.name || "").trim();
+      const name = String(r.name || "")
+        .trim()
+        .slice(0, 200);
       if (!name) continue;
       let assigned = oid(r.assigned_to);
-      if (assigned && !(await canAssignTo(req.user, assigned))) assigned = null;
-      const data = {
+      if (assigned && !canAssign(assigned)) assigned = null;
+      if (me.role === "employee") assigned = me._id;
+      const au = assigned ? userMap.get(String(assigned)) : null;
+      let email = r.email ? String(r.email).trim() : null;
+      if (email && !EMAIL_RE.test(email)) email = null; // keep the lead, drop the bad email
+      const phone = r.phone || null;
+      docs.push({
+        workspace_id: ws,
         name,
-        phone: r.phone || null,
-        email: r.email || null,
+        phone,
+        phone_digits: digits(phone),
+        email,
         company: r.company || null,
         address: r.address || null,
-        source: ENUMS.leadSource.includes(r.source) ? r.source : "other",
+        source: sourceKeys.has(r.source) ? r.source : "other",
         source_dataset:
-          String(req.body.dataset_name || r.source_dataset || "")
+          dataset ||
+          String(r.source_dataset || "")
             .trim()
-            .slice(0, 160) || null,
+            .slice(0, 160) ||
+          null,
         status: stageKeys.has(r.status) ? r.status : defKey,
         estimated_value:
           Number(r.estimated_value) > 0 ? Number(r.estimated_value) : 0,
         notes: r.notes || null,
         assigned_to: assigned,
-      };
-      await stampOwnership(req.user, data, { preserveUnassigned: true });
+        department_id: (au && au.department_id) || me.department_id || null,
+        created_by: me._id,
+      });
+    }
+
+    // Two bulk writes instead of thousands of single inserts.
+    let inserted = [];
+    if (docs.length) {
       try {
-        const lead = await Lead.create(data);
-        await Activity.create({
+        inserted = await Lead.insertMany(docs, { ordered: false });
+      } catch (e) {
+        inserted = e.insertedDocs || []; // ordered:false still inserts the good rows
+        if (!inserted.length && !e.insertedDocs) throw e;
+      }
+    }
+    if (inserted.length) {
+      await Activity.insertMany(
+        inserted.map((lead) => ({
           workspace_id: lead.workspace_id,
           lead_id: lead._id,
           type: "created",
           title: "Lead created",
-          user_id: req.user._id,
+          user_id: me._id,
           department_id: lead.department_id,
-        });
-        count++;
-      } catch (e) {
-        if (e.name !== "ValidationError") throw e; // skip invalid rows (e.g. bad email)
-      }
+        })),
+        { ordered: false },
+      );
     }
+
     emitChange("leads");
     emitChange("activities");
-    res.json({ count });
+    res.json({ count: inserted.length });
   }),
 );
 
@@ -267,6 +397,8 @@ router.post(
     if (data.assigned_to && !(await canAssignTo(req.user, data.assigned_to)))
       throw forbidden("You cannot assign this lead to that person.");
     await stampOwnership(req.user, data);
+    const shared = await resolveShared(req.user, req.body, data.assigned_to);
+    if (shared !== undefined) data.shared_with = shared;
     const lead = await Lead.create(data);
     await logActivity({
       lead_id: lead._id,
@@ -277,6 +409,7 @@ router.post(
     });
     emitChange("leads");
     await lead.populate(ASSIGNEE);
+    await lead.populate(SHARED);
     res.status(201).json(json(lead));
   }),
 );
@@ -300,6 +433,8 @@ router.patch(
       throw forbidden("You cannot assign this lead to that person.");
     }
     lead.set(data);
+    const shared = await resolveShared(req.user, req.body, lead.assigned_to);
+    if (shared !== undefined) lead.shared_with = shared;
     await lead.save();
     if ("status" in data && data.status !== old.status) {
       await logActivity({
@@ -326,6 +461,7 @@ router.patch(
     }
     emitChange("leads");
     await lead.populate(ASSIGNEE);
+    await lead.populate(SHARED);
     res.json(json(lead));
   }),
 );
@@ -407,17 +543,48 @@ router.post(
   }),
 );
 
-// POST /api/leads/:id/log-call
-// Records an outbound call so the agent-outreach report has real data.
-// Called by the app the moment an agent taps "Call" on a lead.
+// Format a call's talk time for the activity title, e.g. 134 -> "2m 14s".
+function fmtDur(sec) {
+  const s = Math.max(0, Math.round(Number(sec) || 0));
+  const m = Math.floor(s / 60);
+  return m ? `${m}m ${s % 60}s` : `${s}s`;
+}
+const CALL_OUTCOMES = new Set(["answered", "not_answered"]);
+
+// Build the title + metadata for a logged call from optional outcome/duration.
+function callFields(body) {
+  const outcome = CALL_OUTCOMES.has(body.outcome) ? body.outcome : null;
+  let dur = Number(body.duration_seconds);
+  if (!Number.isFinite(dur) || dur < 0) dur = 0;
+  // not-answered calls have no talk time
+  if (outcome !== "answered") dur = outcome === "not_answered" ? 0 : dur;
+  let title = "Outbound call";
+  if (outcome === "answered")
+    title = dur
+      ? `Outbound call — Answered (${fmtDur(dur)})`
+      : "Outbound call — Answered";
+  else if (outcome === "not_answered") title = "Outbound call — Not answered";
+  return {
+    title,
+    metadata: { outcome, duration_seconds: outcome === "answered" ? dur : 0 },
+  };
+}
+
+// POST /api/leads/:id/log-call  { outcome?, duration_seconds? }
+// Records an outbound call so the agent-outreach report has real data. Called
+// when an agent taps "Call". On Android the app can also send the call outcome
+// (answered / not_answered) and talk time read from the device call log; iPhone
+// and web just record that a call was placed.
 router.post(
   "/:id/log-call",
   wrap(async (req, res) => {
     const lead = await loadAccessible(Lead, req.user, idParam(req.params.id));
+    const { title, metadata } = callFields(req.body);
     await logActivity({
       lead_id: lead._id,
       type: "call",
-      title: "Outbound call",
+      title,
+      metadata,
       user_id: req.user._id,
       department_id: lead.department_id,
       workspace_id: lead.workspace_id,
@@ -431,3 +598,4 @@ router.post(
 
 module.exports = router;
 module.exports.searchFilter = searchFilter;
+module.exports.callFields = callFields;

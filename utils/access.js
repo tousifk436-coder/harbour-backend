@@ -1,8 +1,10 @@
 /**
  * Permission model (enforced on the server for every request):
- *   super_admin : everything, every department
- *   admin       : every record in their own department (+ records with no department)
+ *   super_admin : everything in the company
+ *   admin       : their own records + records of the agents they created (their subtree);
+ *                 admins are isolated from one another
  *   employee    : only records assigned to them, shared with them, or created by them
+ * `u.subordinate_ids` (self + owned agents) is attached per request by the auth middleware.
  */
 const { User, Lead, Client } = require("../models");
 const { sameId, forbidden, notFound } = require("./http");
@@ -15,9 +17,15 @@ function scopeFilter(u) {
   const ws = { workspace_id: u.workspace_id }; // company boundary — applied to every role
   if (u.role === "super_admin") return ws;
   if (u.role === "admin") {
-    return u.department_id
-      ? { ...ws, department_id: { $in: [null, u.department_id] } }
-      : { ...ws, department_id: null };
+    const ids = u.subordinate_ids || [u._id];
+    return {
+      ...ws,
+      $or: [
+        { assigned_to: { $in: ids } },
+        { created_by: { $in: ids } },
+        { shared_with: { $in: ids } },
+      ],
+    };
   }
   return {
     ...ws,
@@ -34,10 +42,15 @@ function canAccess(u, rec) {
   if (!rec) return false;
   if (!sameId(rec.workspace_id, u.workspace_id)) return false; // different company: always denied
   if (u.role === "super_admin") return true;
-  if (u.role === "admin")
+  if (u.role === "admin") {
+    const ids = (u.subordinate_ids || [u._id]).map(String);
     return (
-      rec.department_id == null || sameId(rec.department_id, u.department_id)
+      ids.includes(String(rec.assigned_to)) ||
+      ids.includes(String(rec.created_by)) ||
+      (Array.isArray(rec.shared_with) &&
+        rec.shared_with.some((x) => ids.includes(String(x))))
     );
+  }
   return (
     sameId(rec.assigned_to, u._id) ||
     sameId(rec.created_by, u._id) ||
@@ -50,13 +63,17 @@ function canAccess(u, rec) {
 async function canAssignTo(u, targetId) {
   if (!targetId) return true;
   const t = await User.findById(targetId)
-    .select("department_id workspace_id")
+    .select("role manager_id workspace_id")
     .lean();
   if (!t || !sameId(t.workspace_id, u.workspace_id)) return false; // must belong to the same company
   if (u.role === "super_admin") return true;
   if (sameId(targetId, u._id)) return true;
-  if (u.role === "admin")
-    return t.department_id != null && sameId(t.department_id, u.department_id);
+  // An admin can assign to agents in their scope: ones they created or ones the
+  // super admin created (the shared pool) — not another admin's agents.
+  if (u.role === "admin") {
+    const ids = (u.subordinate_ids || [u._id]).map(String);
+    return t.role === "employee" && ids.includes(String(targetId));
+  }
   return false;
 }
 

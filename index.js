@@ -21,8 +21,10 @@ const { ensureOwner } = require("./utils/ensureOwner");
 const {
   ensureWorkspacesMigrated,
   fixLegacyIndexes,
+  ensureHierarchySeeded,
 } = require("./utils/bootstrap");
 const { ensureStagesSeeded } = require("./utils/stages");
+const { ensureMastersSeeded } = require("./utils/masters");
 const { startReminderJob } = require("./jobs/reminders");
 
 // ---------------- CORS: public — any website or app may call this API ----------------
@@ -85,6 +87,7 @@ app.use("/api", requireAuth);
 app.use("/api", require("./routes/data-sources"));
 app.use("/api", require("./routes/team")); // departments, profiles, employee performance
 app.use("/api", require("./routes/lead-stages")); // admin-managed lead pipeline stages
+app.use("/api", require("./routes/masters")); // admin-managed lists (sources, designations, follow-up types)
 app.use("/api/leads", require("./routes/leads"));
 app.use("/api/clients", require("./routes/clients"));
 app.use("/api/follow-ups", require("./routes/followups"));
@@ -111,6 +114,8 @@ async function start() {
   await ensureWorkspacesMigrated(); // one-time auto-upgrade of older single-company data
   await ensureOwner();
   await ensureStagesSeeded(); // give every company the default pipeline if it has none
+  await ensureMastersSeeded(); // give every company the default sources/designations/types
+  await ensureHierarchySeeded(); // link existing users into the admin/agent tree
   await ensureAllWorkspaceChannels();
 
   const server = http.createServer(app);

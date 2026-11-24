@@ -10,6 +10,7 @@ const models = require("../models");
 const { Workspace, User, Department } = models;
 const { ensureDefaultChannels } = require("./channels");
 const { seedStagesForWorkspace } = require("./stages");
+const { seedMastersForWorkspace } = require("./masters");
 
 // every collection that holds company data and must carry workspace_id
 const TENANT_MODELS = [
@@ -81,6 +82,7 @@ async function createWorkspace({ companyName, email, password, fullName }) {
   });
   await ensureDefaultChannels(workspace._id);
   await seedStagesForWorkspace(workspace._id);
+  await seedMastersForWorkspace(workspace._id);
   return { workspace, user };
 }
 
@@ -102,9 +104,59 @@ async function fixLegacyIndexes() {
   }
 }
 
+/**
+ * Backfill manager_id for users created before the hierarchy existed, so admins
+ * immediately see their team. Agents link to an admin in the same department
+ * (fallback: a super admin); admins link to a super admin. Runs once — users
+ * that already have a manager are left alone.
+ */
+async function ensureHierarchySeeded() {
+  const workspaces = await Workspace.find().select("_id").lean();
+  let linked = 0;
+  for (const ws of workspaces) {
+    const wsId = ws._id;
+    const supers = await User.find({ workspace_id: wsId, role: "super_admin" })
+      .select("_id")
+      .lean();
+    if (!supers.length) continue;
+    const topSuper = supers[0]._id;
+    const admins = await User.find({ workspace_id: wsId, role: "admin" })
+      .select("_id department_id")
+      .lean();
+    const r1 = await User.updateMany(
+      { workspace_id: wsId, role: "admin", manager_id: null },
+      { $set: { manager_id: topSuper } },
+    );
+    linked += r1.modifiedCount || 0;
+    const employees = await User.find({
+      workspace_id: wsId,
+      role: "employee",
+      manager_id: null,
+    })
+      .select("_id department_id")
+      .lean();
+    for (const emp of employees) {
+      const inDept = emp.department_id
+        ? admins.find(
+            (a) =>
+              a.department_id &&
+              String(a.department_id) === String(emp.department_id),
+          )
+        : null;
+      const mgr = (inDept && inDept._id) || topSuper;
+      // eslint-disable-next-line no-await-in-loop
+      await User.updateOne({ _id: emp._id }, { $set: { manager_id: mgr } });
+      linked += 1;
+    }
+  }
+  if (linked)
+    console.log(`Hierarchy: linked ${linked} existing user(s) to a manager.`);
+}
+
 module.exports = {
   ensureWorkspacesMigrated,
   createWorkspace,
   fixLegacyIndexes,
+  ensureHierarchySeeded,
   TENANT_MODELS,
 };

@@ -51,6 +51,28 @@ async function requireAuth(req, _res, next) {
           "workspace_suspended",
         );
     }
+    // Hierarchy: an admin sees themselves + the agents they created + agents the
+    // SUPER ADMIN created (a shared pool). They never see agents created by
+    // ANOTHER admin, nor other admins / super admins. Precompute this subtree once
+    // so the per-request access filters stay fast and synchronous. Super admins
+    // see the whole company; employees only their own records.
+    if (user.role === "admin") {
+      const supers = await User.find({
+        workspace_id: user.workspace_id,
+        role: "super_admin",
+      })
+        .select("_id")
+        .lean();
+      const superIds = supers.map((s) => s._id);
+      const agents = await User.find({
+        workspace_id: user.workspace_id,
+        role: "employee",
+        $or: [{ manager_id: user._id }, { manager_id: { $in: superIds } }],
+      })
+        .select("_id")
+        .lean();
+      user.subordinate_ids = [user._id, ...agents.map((a) => a._id)];
+    }
     req.user = user;
     next();
   } catch (e) {

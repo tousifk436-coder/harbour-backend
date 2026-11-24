@@ -64,8 +64,7 @@ router.patch(
       if (!label) throw bad("Stage name is required.");
       stage.label = label; // key stays the same so existing leads and reports keep working
     }
-    if ("color" in req.body && HEX.test(req.body.color))
-      stage.color = req.body.color;
+    if ("color" in req.body && HEX.test(req.body.color)) stage.color = req.body.color;
     if ("is_open" in req.body) stage.is_open = !!req.body.is_open;
     if ("position" in req.body && Number.isFinite(Number(req.body.position)))
       stage.position = Number(req.body.position);
@@ -111,10 +110,7 @@ router.delete(
     if (!stage) throw bad("Stage not found.");
     const total = await LeadStage.countDocuments({ workspace_id: ws });
     if (total <= 1) throw bad("You must keep at least one stage.");
-    const inUse = await Lead.countDocuments({
-      workspace_id: ws,
-      status: stage.key,
-    });
+    const inUse = await Lead.countDocuments({ workspace_id: ws, status: stage.key });
     if (inUse > 0)
       throw bad(
         `This stage has ${inUse} lead(s). Move them to another stage before deleting it.`,

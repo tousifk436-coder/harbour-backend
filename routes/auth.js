@@ -4,7 +4,7 @@ const crypto = require("crypto");
 const config = require("../config");
 const { User, Workspace } = require("../models");
 const { signToken, requireAuth } = require("../middleware/auth");
-const { wrap, bad, HttpError, json } = require("../utils/http");
+const { wrap, bad, HttpError, idParam, json } = require("../utils/http");
 const { sendMail } = require("../utils/mail");
 
 const loginHits = new Map();
@@ -69,6 +69,41 @@ router.get(
   requireAuth,
   wrap(async (req, res) => {
     res.json(json(await profileOf(req.user._id)));
+  }),
+);
+
+// POST /api/auth/impersonate { user_id } -> { token, user }
+// "Login as": a super admin (or the owner) gets a working session for one of
+// their admins/agents, to see and use the CRM exactly as that person does.
+// The caller's own token stays valid in their browser, which keeps a
+// "switch back" control. Only admins and agents can be targeted — never another
+// super admin or the owner account — so this cannot be used to gain more access.
+router.post(
+  "/impersonate",
+  requireAuth,
+  wrap(async (req, res) => {
+    const me = req.user;
+    if (me.role !== "super_admin" && me.is_owner !== true)
+      throw new HttpError(
+        403,
+        "Only a super admin can use Login as.",
+        "forbidden",
+      );
+    const target = await User.findById(idParam(req.body.user_id));
+    if (!target || String(target.workspace_id) !== String(me.workspace_id))
+      throw bad("User not found.");
+    if (String(target._id) === String(me._id))
+      throw bad("You are already signed in as yourself.");
+    // A super admin may log in as ANY user in their company — admins, agents and
+    // other super admins — so super admins can cover for each other. (The caller
+    // is already restricted to super admin / owner above.)
+    if (!target.is_active)
+      throw bad("That account is deactivated — reactivate it first.");
+    console.log(
+      `[impersonate] ${me.email} -> ${target.email} (ws ${me.workspace_id})`,
+    );
+    const profile = await profileOf(target._id);
+    res.json({ token: signToken(target), user: json(profile) });
   }),
 );
 

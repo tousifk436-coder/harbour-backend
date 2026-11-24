@@ -53,6 +53,8 @@ const userSchema = new Schema(
     phone: str,
     role: { type: String, enum: ENUMS.role, default: "employee" },
     department_id: nullableRef("Department"),
+    manager_id: nullableRef("User"), // the admin/super-admin who created & owns this user (hierarchy)
+    designation: str, // job title label (admin-managed master), no permissions attached
     is_active: { type: Boolean, default: true },
     is_owner: { type: Boolean, default: false }, // the master owner account (managed from the panel, not reset by .env)
     avatar_url: str,
@@ -65,6 +67,7 @@ const userSchema = new Schema(
 );
 userSchema.index({ department_id: 1 });
 userSchema.index({ role: 1 });
+userSchema.index({ workspace_id: 1, manager_id: 1 });
 relation(userSchema, "department", "Department", "department_id");
 const User = mongoose.model("User", userSchema);
 
@@ -91,7 +94,7 @@ const leadSchema = new Schema(
     },
     company: str,
     address: str,
-    source: { type: String, enum: ENUMS.leadSource, default: "other" },
+    source: { type: String, default: "other", trim: true }, // validated against the lead_source master
     source_dataset: { type: String, default: null, trim: true, maxlength: 160 },
     status: { type: String, default: "new_lead", trim: true }, // validated against the workspace's admin-managed LeadStage list
     estimated_value: {
@@ -150,6 +153,25 @@ leadStageSchema.index({ workspace_id: 1, key: 1 }, { unique: true });
 leadStageSchema.index({ workspace_id: 1, position: 1 });
 const LeadStage = mongoose.model("LeadStage", leadStageSchema);
 
+// ---------------- Masters (admin-managed lookup lists) ----------------
+// One flexible table for every simple list an admin controls: lead sources,
+// designations/job titles, follow-up types, etc. `type` groups them; `key` is
+// the stable slug stored on records (e.g. lead.source), label/color editable.
+const masterSchema = new Schema(
+  {
+    workspace_id: wsRef(),
+    type: { type: String, required: true, trim: true },
+    key: { type: String, required: true, trim: true },
+    label: { type: String, required: true, trim: true },
+    color: { type: String, default: null },
+    position: { type: Number, default: 0 },
+  },
+  baseOptions(),
+);
+masterSchema.index({ workspace_id: 1, type: 1, key: 1 }, { unique: true });
+masterSchema.index({ workspace_id: 1, type: 1, position: 1 });
+const Master = mongoose.model("Master", masterSchema);
+
 // ---------------- Clients ----------------
 const clientSchema = new Schema(
   {
@@ -190,7 +212,7 @@ const followUpSchema = new Schema(
     workspace_id: wsRef(),
     lead_id: nullableRef("Lead"),
     client_id: nullableRef("Client"),
-    type: { type: String, enum: ENUMS.followupType, default: "call" },
+    type: { type: String, default: "call", trim: true }, // validated against the followup_type master
     title: { type: String, required: [true, "Title is required"], trim: true },
     due_at: { type: Date, required: [true, "Date is required"] },
     ends_at: { type: Date, default: null },
@@ -449,6 +471,7 @@ module.exports = {
   User,
   Lead,
   LeadStage,
+  Master,
   Client,
   FollowUp,
   Task,

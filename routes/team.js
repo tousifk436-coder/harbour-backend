@@ -69,10 +69,12 @@ router.post(
 /** Admins see everyone; others see themselves and their department colleagues. */
 function profileScope(u) {
   const ws = { workspace_id: u.workspace_id };
-  if (isAdmin(u)) return ws;
-  const or = [{ _id: u._id }];
-  if (u.department_id) or.push({ department_id: u.department_id });
-  return { ...ws, $or: or };
+  if (u.role === "super_admin") return ws; // sees the whole company
+  // An admin sees themselves + their visible agents (own + super-admin-created),
+  // which the auth middleware precomputed as subordinate_ids.
+  if (u.role === "admin")
+    return { ...ws, _id: { $in: u.subordinate_ids || [u._id] } };
+  return { ...ws, _id: u._id }; // employees see only themselves
 }
 
 router.get(
@@ -129,6 +131,8 @@ router.post(
       phone,
       role,
       department_id,
+      manager_id: me._id, // hierarchy: the creator owns this user
+      designation: String(req.body.designation || "").trim() || null,
     });
     await ensureDefaultChannels(me.workspace_id);
     emitChange("profiles");
@@ -158,6 +162,7 @@ router.patch(
       "avatar_url",
       "role",
       "department_id",
+      "designation",
       "is_active",
     ]);
 
@@ -219,6 +224,10 @@ router.patch(
       patch.full_name = String(patch.full_name || "").trim();
     if ("phone" in patch)
       patch.phone = patch.phone ? String(patch.phone).trim() : null;
+    if ("designation" in patch)
+      patch.designation = patch.designation
+        ? String(patch.designation).trim().slice(0, 80) || null
+        : null;
 
     const membershipChanged = ["role", "department_id", "is_active"].some(
       (k) => k in patch,
@@ -330,9 +339,11 @@ router.get(
     )
       throw bad("Select a valid date range of up to 366 days.");
     const scope = profileScope(req.user);
-    const people = await User.find(scope)
-      .select("full_name email role is_active")
-      .lean();
+    // Super admins do the assigning, not the calling — leave them out of the
+    // agent report so it only shows admins and agents.
+    const people = (
+      await User.find(scope).select("full_name email role is_active").lean()
+    ).filter((p) => p.role !== "super_admin");
     const ids = people.map((p) => p._id);
     const leadCounts = await Lead.aggregate([
       {
@@ -352,7 +363,7 @@ router.get(
       type: "call",
       created_at: { $gte: start, $lte: end },
     })
-      .select("user_id created_at lead_id client_id")
+      .select("user_id created_at lead_id client_id metadata")
       .lean();
     const followups = await FollowUp.find({
       workspace_id: req.user.workspace_id,
@@ -371,6 +382,9 @@ router.get(
       is_active: p.is_active,
       leads_assigned: leadMap[String(p._id)] || 0,
       logged_calls: 0,
+      answered_calls: 0,
+      not_answered_calls: 0,
+      talk_time_seconds: 0,
       completed_call_followups: 0,
       unique_leads_contacted: 0,
       hourly: Array.from({ length: 24 }, (_, hour) => ({ hour, calls: 0 })),
@@ -382,6 +396,13 @@ router.get(
         r = byId[id];
       if (!r) continue;
       r.logged_calls++;
+      const o = c.metadata?.outcome;
+      if (o === "answered") {
+        r.answered_calls++;
+        r.talk_time_seconds += Number(c.metadata?.duration_seconds) || 0;
+      } else if (o === "not_answered") {
+        r.not_answered_calls++;
+      }
       r.hourly[new Date(c.created_at).getUTCHours()].calls++;
       if (c.lead_id) (contacted[id] ||= new Set()).add(String(c.lead_id));
     }
@@ -390,12 +411,48 @@ router.get(
       if (r) r.completed_call_followups++;
     }
     for (const r of rows) r.unique_leads_contacted = contacted[r.id]?.size || 0;
+
+    // A readable log of the most recent calls: who called, whom, and when.
+    const recent = [...calls]
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+      .slice(0, 100);
+    const leadIds = recent.filter((c) => c.lead_id).map((c) => c.lead_id);
+    const clientIds = recent.filter((c) => c.client_id).map((c) => c.client_id);
+    const [leadsN, clientsN] = await Promise.all([
+      Lead.find({ _id: { $in: leadIds } })
+        .select("name")
+        .lean(),
+      Client.find({ _id: { $in: clientIds } })
+        .select("name")
+        .lean(),
+    ]);
+    const leadName = Object.fromEntries(
+      leadsN.map((l) => [String(l._id), l.name]),
+    );
+    const clientName = Object.fromEntries(
+      clientsN.map((c) => [String(c._id), c.name]),
+    );
+    const agentName = Object.fromEntries(rows.map((r) => [r.id, r.full_name]));
+    const recent_calls = recent.map((c) => ({
+      agent: agentName[String(c.user_id)] || "—",
+      contact: c.lead_id
+        ? leadName[String(c.lead_id)] || "Lead"
+        : c.client_id
+          ? clientName[String(c.client_id)] || "Customer"
+          : "—",
+      kind: c.lead_id ? "Lead" : c.client_id ? "Customer" : "—",
+      at: c.created_at,
+      outcome: c.metadata?.outcome || null, // "answered" | "not_answered" | null
+      duration_seconds: Number(c.metadata?.duration_seconds) || 0,
+    }));
+
     res.json({
       from: start.toISOString(),
       to: end.toISOString(),
       timezone: "UTC",
       source: "CRM logged call activities",
       rows,
+      recent_calls,
     });
   }),
 );

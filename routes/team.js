@@ -349,53 +349,57 @@ router.get(
     // "Assigned leads" counts a lead for its owner AND for every co-assignee
     // (the "+1" shared_with), so it matches what the Leads list shows and its
     // person filter — a lead assigned to two people counts for both.
-    const leadCounts = await Lead.aggregate([
-      {
-        $match: {
-          workspace_id: req.user.workspace_id,
-          $or: [{ assigned_to: { $in: ids } }, { shared_with: { $in: ids } }],
-        },
-      },
-      {
-        $project: {
-          people: {
-            $setUnion: [
-              {
-                $cond: [
-                  { $ifNull: ["$assigned_to", false] },
-                  ["$assigned_to"],
-                  [],
-                ],
-              },
-              { $ifNull: ["$shared_with", []] },
-            ],
+    // Speed: these three are independent — run them together instead of one
+    // after another, so the report returns in one DB round-trip's time.
+    const [leadCounts, calls, followups] = await Promise.all([
+      Lead.aggregate([
+        {
+          $match: {
+            workspace_id: req.user.workspace_id,
+            $or: [{ assigned_to: { $in: ids } }, { shared_with: { $in: ids } }],
           },
         },
-      },
-      { $unwind: "$people" },
-      { $match: { people: { $in: ids } } },
-      { $group: { _id: "$people", count: { $sum: 1 } } },
+        {
+          $project: {
+            people: {
+              $setUnion: [
+                {
+                  $cond: [
+                    { $ifNull: ["$assigned_to", false] },
+                    ["$assigned_to"],
+                    [],
+                  ],
+                },
+                { $ifNull: ["$shared_with", []] },
+              ],
+            },
+          },
+        },
+        { $unwind: "$people" },
+        { $match: { people: { $in: ids } } },
+        { $group: { _id: "$people", count: { $sum: 1 } } },
+      ]),
+      Activity.find({
+        workspace_id: req.user.workspace_id,
+        user_id: { $in: ids },
+        type: "call",
+        created_at: { $gte: start, $lte: end },
+      })
+        .select("user_id created_at lead_id client_id metadata")
+        .lean(),
+      FollowUp.find({
+        workspace_id: req.user.workspace_id,
+        assigned_to: { $in: ids },
+        type: "call",
+        status: "done",
+        completed_at: { $gte: start, $lte: end },
+      })
+        .select("assigned_to completed_at")
+        .lean(),
     ]);
     const leadMap = Object.fromEntries(
       leadCounts.map((x) => [String(x._id), x.count]),
     );
-    const calls = await Activity.find({
-      workspace_id: req.user.workspace_id,
-      user_id: { $in: ids },
-      type: "call",
-      created_at: { $gte: start, $lte: end },
-    })
-      .select("user_id created_at lead_id client_id metadata")
-      .lean();
-    const followups = await FollowUp.find({
-      workspace_id: req.user.workspace_id,
-      assigned_to: { $in: ids },
-      type: "call",
-      status: "done",
-      completed_at: { $gte: start, $lte: end },
-    })
-      .select("assigned_to completed_at")
-      .lean();
     const rows = people.map((p) => ({
       id: String(p._id),
       full_name: p.full_name,

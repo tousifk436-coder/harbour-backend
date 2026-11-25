@@ -346,14 +346,35 @@ router.get(
       .select("full_name email role is_active")
       .lean();
     const ids = people.map((p) => p._id);
+    // "Assigned leads" counts a lead for its owner AND for every co-assignee
+    // (the "+1" shared_with), so it matches what the Leads list shows and its
+    // person filter — a lead assigned to two people counts for both.
     const leadCounts = await Lead.aggregate([
       {
         $match: {
           workspace_id: req.user.workspace_id,
-          assigned_to: { $in: ids },
+          $or: [{ assigned_to: { $in: ids } }, { shared_with: { $in: ids } }],
         },
       },
-      { $group: { _id: "$assigned_to", count: { $sum: 1 } } },
+      {
+        $project: {
+          people: {
+            $setUnion: [
+              {
+                $cond: [
+                  { $ifNull: ["$assigned_to", false] },
+                  ["$assigned_to"],
+                  [],
+                ],
+              },
+              { $ifNull: ["$shared_with", []] },
+            ],
+          },
+        },
+      },
+      { $unwind: "$people" },
+      { $match: { people: { $in: ids } } },
+      { $group: { _id: "$people", count: { $sum: 1 } } },
     ]);
     const leadMap = Object.fromEntries(
       leadCounts.map((x) => [String(x._id), x.count]),

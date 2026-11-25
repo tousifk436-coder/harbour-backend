@@ -146,11 +146,7 @@ router.get(
     } else if (q.assigned_to) {
       const aid = oid(q.assigned_to);
       and.push({
-        $or: [
-          { assigned_to: aid },
-          { shared_with: aid },
-          { created_by: aid },
-        ],
+        $or: [{ assigned_to: aid }, { shared_with: aid }, { created_by: aid }],
       });
     }
     const filter = { $and: and };
@@ -280,7 +276,9 @@ router.post(
     const defKey = await defaultStageKey(ws);
     const sourceKeys = await masterKeySet(ws, "lead_source");
     const dataset =
-      String(req.body.dataset_name || "").trim().slice(0, 160) || null;
+      String(req.body.dataset_name || "")
+        .trim()
+        .slice(0, 160) || null;
 
     // Load every assigned user once, so the loop below does no per-row DB calls.
     const wantedIds = [
@@ -303,7 +301,9 @@ router.post(
       if (me.role === "super_admin") return true;
       if (sameId(target, me._id)) return true;
       if (me.role === "admin")
-        return u.department_id != null && sameId(u.department_id, me.department_id);
+        return (
+          u.department_id != null && sameId(u.department_id, me.department_id)
+        );
       return false;
     };
 
@@ -311,7 +311,9 @@ router.post(
     // because insertMany bypasses the save hook).
     const docs = [];
     for (const r of rows) {
-      const name = String(r.name || "").trim().slice(0, 200);
+      const name = String(r.name || "")
+        .trim()
+        .slice(0, 200);
       if (!name) continue;
       let assigned = oid(r.assigned_to);
       if (assigned && !canAssign(assigned)) assigned = null;
@@ -331,7 +333,9 @@ router.post(
         source: sourceKeys.has(r.source) ? r.source : "other",
         source_dataset:
           dataset ||
-          String(r.source_dataset || "").trim().slice(0, 160) ||
+          String(r.source_dataset || "")
+            .trim()
+            .slice(0, 160) ||
           null,
         status: stageKeys.has(r.status) ? r.status : defKey,
         estimated_value:
@@ -436,32 +440,40 @@ router.patch(
     const shared = await resolveShared(req.user, req.body, lead.assigned_to);
     if (shared !== undefined) lead.shared_with = shared;
     await lead.save();
+    // Speed: run the history log(s) and both populates together instead of one
+    // after another — fewer sequential round-trips, so a stage change returns faster.
+    const after = [];
     if ("status" in data && data.status !== old.status) {
-      await logActivity({
-        lead_id: lead._id,
-        type: "status_change",
-        title: `Status changed from ${old.status} to ${lead.status}`,
-        metadata: { from: old.status, to: lead.status },
-        user_id: req.user._id,
-        department_id: lead.department_id,
-      });
+      after.push(
+        logActivity({
+          lead_id: lead._id,
+          type: "status_change",
+          title: `Status changed from ${old.status} to ${lead.status}`,
+          metadata: { from: old.status, to: lead.status },
+          user_id: req.user._id,
+          department_id: lead.department_id,
+        }),
+      );
     }
     if ("assigned_to" in data && !sameId(old.assigned_to, lead.assigned_to)) {
-      await logActivity({
-        lead_id: lead._id,
-        type: "assignment",
-        title: "Lead reassigned",
-        metadata: {
-          from: old.assigned_to ? String(old.assigned_to) : null,
-          to: lead.assigned_to ? String(lead.assigned_to) : null,
-        },
-        user_id: req.user._id,
-        department_id: lead.department_id,
-      });
+      after.push(
+        logActivity({
+          lead_id: lead._id,
+          type: "assignment",
+          title: "Lead reassigned",
+          metadata: {
+            from: old.assigned_to ? String(old.assigned_to) : null,
+            to: lead.assigned_to ? String(lead.assigned_to) : null,
+          },
+          user_id: req.user._id,
+          department_id: lead.department_id,
+        }),
+      );
     }
+    after.push(lead.populate(ASSIGNEE));
+    after.push(lead.populate(SHARED));
     emitChange("leads");
-    await lead.populate(ASSIGNEE);
-    await lead.populate(SHARED);
+    await Promise.all(after);
     res.json(json(lead));
   }),
 );
@@ -560,13 +572,18 @@ function callFields(body) {
   if (outcome !== "answered") dur = outcome === "not_answered" ? 0 : dur;
   let title = "Outbound call";
   if (outcome === "answered")
-    title = dur ? `Outbound call — Answered (${fmtDur(dur)})` : "Outbound call — Answered";
+    title = dur
+      ? `Outbound call — Answered (${fmtDur(dur)})`
+      : "Outbound call — Answered";
   else if (outcome === "not_answered") title = "Outbound call — Not answered";
   // call_ts = the device call-log entry's own timestamp (ms). Used to de-duplicate
   // the same physical call when it arrives from more than one source
   // (background receiver + on-open reconcile).
   const callTs = Number(body.call_ts);
-  const metadata = { outcome, duration_seconds: outcome === "answered" ? dur : 0 };
+  const metadata = {
+    outcome,
+    duration_seconds: outcome === "answered" ? dur : 0,
+  };
   if (Number.isFinite(callTs) && callTs > 0) metadata.call_ts = callTs;
   return { title, metadata };
 }

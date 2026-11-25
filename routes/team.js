@@ -340,10 +340,11 @@ router.get(
       throw bad("Select a valid date range of up to 366 days.");
     const scope = profileScope(req.user);
     // Super admins do the assigning, not the calling — leave them out of the
-    // agent report so it only shows admins and agents.
-    const people = (
-      await User.find(scope).select("full_name email role is_active").lean()
-    ).filter((p) => p.role !== "super_admin");
+    // report. Includes everyone in scope — admins, agents AND super admins —
+    // so a super admin's own calls are counted too.
+    const people = await User.find(scope)
+      .select("full_name email role is_active")
+      .lean();
     const ids = people.map((p) => p._id);
     const leadCounts = await Lead.aggregate([
       {
@@ -484,9 +485,8 @@ router.get(
 
     // Same people scope as the agent report (super admins excluded).
     const scope = profileScope(req.user);
-    const people = (
-      await User.find(scope).select("full_name role").lean()
-    ).filter((p) => p.role !== "super_admin");
+    // Everyone in scope, super admins included (their calls count too).
+    const people = await User.find(scope).select("full_name role").lean();
     const nameById = Object.fromEntries(
       people.map((p) => [String(p._id), p.full_name]),
     );

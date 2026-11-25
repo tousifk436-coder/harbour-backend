@@ -146,19 +146,27 @@ router.get(
     } else if (q.assigned_to) {
       const aid = oid(q.assigned_to);
       and.push({
-        $or: [{ assigned_to: aid }, { shared_with: aid }, { created_by: aid }],
+        $or: [
+          { assigned_to: aid },
+          { shared_with: aid },
+          { created_by: aid },
+        ],
       });
     }
     const filter = { $and: and };
     const sortField = SORTABLE.includes(q.sort) ? q.sort : "created_at";
+    // Speed: the list rows don't use notes/address, so skip those big fields;
+    // and only count the total on the FIRST page (the app reads count from page 0
+    // only — counting on every scroll page was wasted work).
     const [rows, count] = await Promise.all([
       Lead.find(filter)
         .sort({ [sortField]: q.dir === "asc" ? 1 : -1, _id: -1 })
         .skip(page * size)
         .limit(size)
+        .select("-notes -address")
         .populate(ASSIGNEE)
         .populate(SHARED),
-      Lead.countDocuments(filter),
+      page === 0 ? Lead.countDocuments(filter) : Promise.resolve(undefined),
     ]);
     res.json({ rows: rows.map(json), count });
   }),
@@ -272,9 +280,7 @@ router.post(
     const defKey = await defaultStageKey(ws);
     const sourceKeys = await masterKeySet(ws, "lead_source");
     const dataset =
-      String(req.body.dataset_name || "")
-        .trim()
-        .slice(0, 160) || null;
+      String(req.body.dataset_name || "").trim().slice(0, 160) || null;
 
     // Load every assigned user once, so the loop below does no per-row DB calls.
     const wantedIds = [
@@ -297,9 +303,7 @@ router.post(
       if (me.role === "super_admin") return true;
       if (sameId(target, me._id)) return true;
       if (me.role === "admin")
-        return (
-          u.department_id != null && sameId(u.department_id, me.department_id)
-        );
+        return u.department_id != null && sameId(u.department_id, me.department_id);
       return false;
     };
 
@@ -307,9 +311,7 @@ router.post(
     // because insertMany bypasses the save hook).
     const docs = [];
     for (const r of rows) {
-      const name = String(r.name || "")
-        .trim()
-        .slice(0, 200);
+      const name = String(r.name || "").trim().slice(0, 200);
       if (!name) continue;
       let assigned = oid(r.assigned_to);
       if (assigned && !canAssign(assigned)) assigned = null;
@@ -329,9 +331,7 @@ router.post(
         source: sourceKeys.has(r.source) ? r.source : "other",
         source_dataset:
           dataset ||
-          String(r.source_dataset || "")
-            .trim()
-            .slice(0, 160) ||
+          String(r.source_dataset || "").trim().slice(0, 160) ||
           null,
         status: stageKeys.has(r.status) ? r.status : defKey,
         estimated_value:
@@ -560,18 +560,13 @@ function callFields(body) {
   if (outcome !== "answered") dur = outcome === "not_answered" ? 0 : dur;
   let title = "Outbound call";
   if (outcome === "answered")
-    title = dur
-      ? `Outbound call — Answered (${fmtDur(dur)})`
-      : "Outbound call — Answered";
+    title = dur ? `Outbound call — Answered (${fmtDur(dur)})` : "Outbound call — Answered";
   else if (outcome === "not_answered") title = "Outbound call — Not answered";
   // call_ts = the device call-log entry's own timestamp (ms). Used to de-duplicate
   // the same physical call when it arrives from more than one source
   // (background receiver + on-open reconcile).
   const callTs = Number(body.call_ts);
-  const metadata = {
-    outcome,
-    duration_seconds: outcome === "answered" ? dur : 0,
-  };
+  const metadata = { outcome, duration_seconds: outcome === "answered" ? dur : 0 };
   if (Number.isFinite(callTs) && callTs > 0) metadata.call_ts = callTs;
   return { title, metadata };
 }

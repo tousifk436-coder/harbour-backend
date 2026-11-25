@@ -129,6 +129,10 @@ leadSchema.index({ shared_with: 1 });
 leadSchema.index({ workspace_id: 1, created_at: -1 });
 leadSchema.index({ workspace_id: 1, status: 1 });
 leadSchema.index({ workspace_id: 1, assigned_to: 1 });
+// Speed: filtering the leads list by Source, and the "created/imported by me"
+// part of the person filter, previously scanned the whole collection.
+leadSchema.index({ workspace_id: 1, source: 1 });
+leadSchema.index({ created_by: 1 });
 relation(leadSchema, "assignee", "User", "assigned_to");
 const Lead = mongoose.model("Lead", leadSchema);
 

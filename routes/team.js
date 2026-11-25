@@ -596,6 +596,138 @@ router.get(
   }),
 );
 
+// A signed-in user's OWN calls (agents don't get the team report, but they can
+// see their personal call log here). Same filters + pagination as /reports/calls.
+router.get(
+  "/reports/my-calls",
+  wrap(async (req, res) => {
+    const start = new Date(String(req.query.from || ""));
+    const end = new Date(String(req.query.to || ""));
+    if (
+      Number.isNaN(+start) ||
+      Number.isNaN(+end) ||
+      start > end ||
+      +end - +start > 366 * 86400000
+    )
+      throw bad("Select a valid date range of up to 366 days.");
+
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const pageSize = Math.min(
+      100,
+      Math.max(1, parseInt(req.query.pageSize, 10) || 20),
+    );
+
+    const base = {
+      workspace_id: req.user.workspace_id,
+      user_id: req.user._id,
+      type: "call",
+      created_at: { $gte: start, $lte: end },
+    };
+
+    // Totals across all my calls in the range (independent of the row filters).
+    const forTotals = await Activity.find(base).select("metadata").lean();
+    let answered = 0;
+    let notAnswered = 0;
+    let talk = 0;
+    for (const c of forTotals) {
+      const o = c.metadata?.outcome;
+      if (o === "answered") {
+        answered++;
+        talk += Number(c.metadata?.duration_seconds) || 0;
+      } else if (o === "not_answered") notAnswered++;
+    }
+
+    const and = [base];
+    const type = String(req.query.type || "").toLowerCase();
+    if (type === "lead") and.push({ lead_id: { $ne: null } });
+    else if (type === "customer") and.push({ client_id: { $ne: null } });
+
+    const outcome = String(req.query.outcome || "").toLowerCase();
+    if (outcome === "answered" || outcome === "not_answered")
+      and.push({ "metadata.outcome": outcome });
+    else if (outcome === "none")
+      and.push({
+        $or: [
+          { "metadata.outcome": null },
+          { "metadata.outcome": { $exists: false } },
+        ],
+      });
+
+    const q = String(req.query.q || "").trim();
+    if (q) {
+      const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+      const [leadsM, clientsM] = await Promise.all([
+        Lead.find({ workspace_id: req.user.workspace_id, name: rx })
+          .select("_id")
+          .lean(),
+        Client.find({ workspace_id: req.user.workspace_id, name: rx })
+          .select("_id")
+          .lean(),
+      ]);
+      and.push({
+        $or: [
+          { lead_id: { $in: leadsM.map((l) => l._id) } },
+          { client_id: { $in: clientsM.map((c) => c._id) } },
+        ],
+      });
+    }
+
+    const match = { $and: and };
+    const total = await Activity.countDocuments(match);
+    const docs = await Activity.find(match)
+      .select("user_id created_at lead_id client_id metadata")
+      .sort({ created_at: -1 })
+      .skip((page - 1) * pageSize)
+      .limit(pageSize)
+      .lean();
+
+    const leadIds = docs.filter((c) => c.lead_id).map((c) => c.lead_id);
+    const clientIds = docs.filter((c) => c.client_id).map((c) => c.client_id);
+    const [leadsN, clientsN] = await Promise.all([
+      Lead.find({ _id: { $in: leadIds } })
+        .select("name")
+        .lean(),
+      Client.find({ _id: { $in: clientIds } })
+        .select("name")
+        .lean(),
+    ]);
+    const leadName = Object.fromEntries(
+      leadsN.map((l) => [String(l._id), l.name]),
+    );
+    const clientName = Object.fromEntries(
+      clientsN.map((c) => [String(c._id), c.name]),
+    );
+
+    const rows = docs.map((c) => ({
+      contact: c.lead_id
+        ? leadName[String(c.lead_id)] || "Lead"
+        : c.client_id
+          ? clientName[String(c.client_id)] || "Customer"
+          : "—",
+      kind: c.lead_id ? "Lead" : c.client_id ? "Customer" : "—",
+      lead_id: c.lead_id ? String(c.lead_id) : null,
+      client_id: c.client_id ? String(c.client_id) : null,
+      at: c.created_at,
+      outcome: c.metadata?.outcome || null,
+      duration_seconds: Number(c.metadata?.duration_seconds) || 0,
+    }));
+
+    res.json({
+      rows,
+      total,
+      page,
+      pageSize,
+      pages: Math.max(1, Math.ceil(total / pageSize)),
+      totals: {
+        calls: forTotals.length,
+        answered,
+        not_answered: notAnswered,
+        talk_time_seconds: talk,
+      },
+    });
+  }),
+);
+
 // ---------------- Employee performance ----------------
 router.get(
   "/employee-performance",

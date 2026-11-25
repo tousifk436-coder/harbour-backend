@@ -1,5 +1,5 @@
 const router = require("express").Router();
-const { Client } = require("../models");
+const { Client, Activity } = require("../models");
 const {
   wrap,
   bad,
@@ -137,6 +137,19 @@ router.post(
   wrap(async (req, res) => {
     const c = await loadAccessible(Client, req.user, idParam(req.params.id));
     const { title, metadata } = callFields(req.body);
+    // De-duplicate the same physical call (background receiver + on-open reconcile).
+    if (metadata.call_ts) {
+      const dup = await Activity.findOne({
+        workspace_id: c.workspace_id,
+        client_id: c._id,
+        user_id: req.user._id,
+        type: "call",
+        "metadata.call_ts": metadata.call_ts,
+      })
+        .select("_id")
+        .lean();
+      if (dup) return res.json({ ok: true, duplicate: true });
+    }
     await logActivity({
       client_id: c._id,
       type: "call",

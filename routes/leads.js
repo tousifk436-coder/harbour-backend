@@ -564,10 +564,16 @@ function callFields(body) {
       ? `Outbound call — Answered (${fmtDur(dur)})`
       : "Outbound call — Answered";
   else if (outcome === "not_answered") title = "Outbound call — Not answered";
-  return {
-    title,
-    metadata: { outcome, duration_seconds: outcome === "answered" ? dur : 0 },
+  // call_ts = the device call-log entry's own timestamp (ms). Used to de-duplicate
+  // the same physical call when it arrives from more than one source
+  // (background receiver + on-open reconcile).
+  const callTs = Number(body.call_ts);
+  const metadata = {
+    outcome,
+    duration_seconds: outcome === "answered" ? dur : 0,
   };
+  if (Number.isFinite(callTs) && callTs > 0) metadata.call_ts = callTs;
+  return { title, metadata };
 }
 
 // POST /api/leads/:id/log-call  { outcome?, duration_seconds? }
@@ -580,6 +586,21 @@ router.post(
   wrap(async (req, res) => {
     const lead = await loadAccessible(Lead, req.user, idParam(req.params.id));
     const { title, metadata } = callFields(req.body);
+    // De-duplicate: if this exact call (same lead + caller + call_ts) was already
+    // logged, don't log it again. Covers the background receiver and the on-open
+    // reconcile both reporting the same physical call.
+    if (metadata.call_ts) {
+      const dup = await Activity.findOne({
+        workspace_id: lead.workspace_id,
+        lead_id: lead._id,
+        user_id: req.user._id,
+        type: "call",
+        "metadata.call_ts": metadata.call_ts,
+      })
+        .select("_id")
+        .lean();
+      if (dup) return res.json({ ok: true, duplicate: true });
+    }
     await logActivity({
       lead_id: lead._id,
       type: "call",

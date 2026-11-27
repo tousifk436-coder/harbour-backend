@@ -60,6 +60,86 @@ const SORTABLE = [
 ];
 const ASSIGNEE = { path: "assignee", select: "full_name" };
 const SHARED = { path: "shared_with", select: "full_name" };
+// A lead with no usable contact number (blank/absent phone).
+const NO_PHONE = {
+  $or: [
+    { phone_digits: { $in: [null, ""] } },
+    { phone_digits: { $exists: false } },
+  ],
+};
+// A lead with no email.
+const NO_EMAIL = {
+  $or: [{ email: { $in: [null, ""] } }, { email: { $exists: false } }],
+};
+const truthy = (v) => v === true || v === "1" || v === "true";
+
+// Centralized lead filtering, shared by the list AND the bulk actions, so every
+// filter below works for listing, bulk-assign and bulk-delete alike.
+// p: { search, status, source, source_dataset, assigned_to, created_by,
+//      no_phone, no_email, has_phone, has_email, never_contacted, contacted,
+//      converted, date_from, date_to, updated_from, updated_to,
+//      min_value, max_value, stage_role }
+function buildLeadAnd(user, p = {}) {
+  const and = [
+    scopeFilter(user),
+    searchFilter(p.search, ["name", "email", "phone", "company"]),
+  ];
+  if (p.status) and.push({ status: p.status });
+  if (p.source) and.push({ source: p.source });
+  if (p.source_dataset) and.push({ source_dataset: p.source_dataset });
+  if (truthy(p.no_phone)) and.push(NO_PHONE);
+  if (truthy(p.no_email)) and.push(NO_EMAIL);
+  if (truthy(p.has_phone))
+    and.push({ phone_digits: { $nin: [null, ""], $exists: true } });
+  if (truthy(p.has_email))
+    and.push({ email: { $nin: [null, ""], $exists: true } });
+  if (truthy(p.never_contacted)) and.push({ last_contacted_at: null });
+  if (truthy(p.contacted)) and.push({ last_contacted_at: { $ne: null } });
+  if (truthy(p.converted)) and.push({ converted_client_id: { $ne: null } });
+  if (p.created_by) {
+    const cid = oid(p.created_by);
+    if (cid) and.push({ created_by: cid });
+  }
+  // Added (created_at) range.
+  const df = p.date_from ? new Date(p.date_from) : null;
+  if (df && !Number.isNaN(+df)) and.push({ created_at: { $gte: df } });
+  const dt = p.date_to ? new Date(p.date_to) : null;
+  if (dt && !Number.isNaN(+dt)) {
+    dt.setHours(23, 59, 59, 999);
+    and.push({ created_at: { $lte: dt } });
+  }
+  // Last-updated range.
+  const uf = p.updated_from ? new Date(p.updated_from) : null;
+  if (uf && !Number.isNaN(+uf)) and.push({ updated_at: { $gte: uf } });
+  const ut = p.updated_to ? new Date(p.updated_to) : null;
+  if (ut && !Number.isNaN(+ut)) {
+    ut.setHours(23, 59, 59, 999);
+    and.push({ updated_at: { $lte: ut } });
+  }
+  // Estimated value range.
+  if (
+    p.min_value !== undefined &&
+    p.min_value !== "" &&
+    !Number.isNaN(Number(p.min_value))
+  )
+    and.push({ estimated_value: { $gte: Number(p.min_value) } });
+  if (
+    p.max_value !== undefined &&
+    p.max_value !== "" &&
+    !Number.isNaN(Number(p.max_value))
+  )
+    and.push({ estimated_value: { $lte: Number(p.max_value) } });
+  // Assignment: a person's leads (owned, shared, or imported), or Unassigned.
+  if (p.assigned_to === "unassigned") {
+    and.push({ assigned_to: null });
+  } else if (p.assigned_to) {
+    const aid = oid(p.assigned_to);
+    and.push({
+      $or: [{ assigned_to: aid }, { shared_with: aid }, { created_by: aid }],
+    });
+  }
+  return and;
+}
 
 // Stages are admin-managed per company (LeadStage). These helpers validate a
 // lead's status against the company's stage list and find semantic stages.
@@ -130,25 +210,7 @@ router.get(
     const q = req.query;
     const page = Math.max(0, Number(q.page) || 0);
     const size = Math.min(500, Math.max(1, Number(q.pageSize) || 25));
-    const and = [
-      scopeFilter(req.user),
-      searchFilter(q.search, ["name", "email", "phone", "company"]),
-    ];
-    if (q.status) and.push({ status: q.status });
-    if (q.source) and.push({ source: q.source });
-    if (q.source_dataset) and.push({ source_dataset: q.source_dataset });
-    // Filter by a person = leads they OWN, are CO-ASSIGNED (shared) on, or
-    // CREATED/IMPORTED. So the person who imported a batch can filter to it even
-    // before anyone is assigned. The special value "unassigned" lists leads with
-    // no owner yet, so admins can find and distribute them.
-    if (q.assigned_to === "unassigned") {
-      and.push({ assigned_to: null });
-    } else if (q.assigned_to) {
-      const aid = oid(q.assigned_to);
-      and.push({
-        $or: [{ assigned_to: aid }, { shared_with: aid }, { created_by: aid }],
-      });
-    }
+    const and = buildLeadAnd(req.user, q);
     const filter = { $and: and };
     const sortField = SORTABLE.includes(q.sort) ? q.sort : "created_at";
     // Speed: the list rows don't use notes/address, so skip those big fields;
@@ -196,28 +258,13 @@ router.post(
       throw forbidden("You cannot assign leads to that person.");
 
     // Always limited to the leads this user is allowed to see (company + role).
-    const and = [scopeFilter(req.user)];
+    let and;
     if (all) {
-      and.push(searchFilter(f.search, ["name", "email", "phone", "company"]));
-      if (f.status) and.push({ status: f.status });
-      if (f.source) and.push({ source: f.source });
-      if (f.source_dataset) and.push({ source_dataset: f.source_dataset });
-      if (f.assigned_to === "unassigned") {
-        and.push({ assigned_to: null });
-      } else if (f.assigned_to) {
-        const aid = oid(f.assigned_to);
-        and.push({
-          $or: [
-            { assigned_to: aid },
-            { shared_with: aid },
-            { created_by: aid },
-          ],
-        });
-      }
+      and = buildLeadAnd(req.user, f);
     } else {
       const list = (Array.isArray(ids) ? ids : []).map(oid).filter(Boolean);
       if (!list.length) throw bad("No leads selected.");
-      and.push({ _id: { $in: list } });
+      and = [scopeFilter(req.user), { _id: { $in: list } }];
     }
 
     let result;
@@ -261,6 +308,29 @@ router.post(
       ok: true,
       modified: result.modifiedCount ?? result.nModified ?? 0,
     });
+  }),
+);
+
+// POST /api/leads/bulk-delete
+//   body: { ids?: string[], all?: boolean,
+//           filter?: { search, status, source, source_dataset, assigned_to, no_phone } }
+// Deletes the selected leads (or every lead matching the current filter when
+// `all` is set), always limited to the leads this user is allowed to see.
+router.post(
+  "/bulk-delete",
+  wrap(async (req, res) => {
+    const { ids, all, filter: f = {} } = req.body || {};
+    let and;
+    if (all) {
+      and = buildLeadAnd(req.user, f);
+    } else {
+      const list = (Array.isArray(ids) ? ids : []).map(oid).filter(Boolean);
+      if (!list.length) throw bad("No leads selected.");
+      and = [scopeFilter(req.user), { _id: { $in: list } }];
+    }
+    const result = await Lead.deleteMany({ $and: and });
+    emitChange("leads");
+    res.json({ ok: true, deleted: result.deletedCount ?? 0 });
   }),
 );
 
